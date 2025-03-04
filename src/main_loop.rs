@@ -2201,6 +2201,32 @@ mod test {
 
         #[tokio::test]
         #[traced_test]
+        async fn prune_peers_not_too_many_connections() {
+            let num_init_peers_outgoing = 10;
+            let num_init_peers_incoming = 1;
+            let test_setup = setup(num_init_peers_outgoing, num_init_peers_incoming).await;
+            let TestSetup {
+                main_to_peer_rx,
+                mut main_loop_handler,
+                ..
+            } = test_setup;
+
+            let mocked_cli = cli_args::Args {
+                max_num_peers: 200,
+                ..Default::default()
+            };
+
+            main_loop_handler
+                .global_state_lock
+                .set_cli(mocked_cli)
+                .await;
+
+            main_loop_handler.prune_peers().await.unwrap();
+            assert!(main_to_peer_rx.is_empty());
+        }
+
+        #[tokio::test]
+        #[traced_test]
         async fn no_warning_on_peer_exceeding_limit_if_connections_are_outgoing() {
             let num_init_peers_outgoing = 2;
             let num_init_peers_incoming = 0;
