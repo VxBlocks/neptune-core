@@ -921,7 +921,7 @@ impl MainLoopHandler {
 
         // pick peers not specified in the command line arguments to
         // disconnect from
-        let num_peers_to_disconnect = max_num_peers - num_peers;
+        let num_peers_to_disconnect = num_peers - max_num_peers;
         let peers_to_disconnect = connected_peers
             .into_iter()
             .filter(|peer| !cli_args.peers.contains(&peer.connected_address()))
@@ -1758,6 +1758,7 @@ impl MainLoopHandler {
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
     use std::time::UNIX_EPOCH;
 
     use tracing_test::traced_test;
@@ -1765,6 +1766,7 @@ mod test {
     use super::*;
     use crate::config_models::cli_args;
     use crate::config_models::network::Network;
+    use crate::tests::shared::get_dummy_peer_incoming;
     use crate::tests::shared::get_test_genesis_setup;
     use crate::MINER_CHANNEL_CAPACITY;
 
@@ -1777,14 +1779,14 @@ mod test {
         main_to_peer_rx: broadcast::Receiver<MainToPeerTask>,
     }
 
-    async fn setup(num_init_peers_outgoing: u8) -> TestSetup {
+    async fn setup(num_init_peers_outgoing: u8, num_peers_incoming: u8) -> TestSetup {
         let network = Network::Main;
         let (
             main_to_peer_tx,
             main_to_peer_rx,
             peer_to_main_tx,
             peer_to_main_rx,
-            state,
+            mut state,
             _own_handshake_data,
         ) = get_test_genesis_setup(network, num_init_peers_outgoing, cli_args::Args::default())
             .await
@@ -1799,6 +1801,17 @@ mod test {
                 .all(|(_addr, peer)| peer.connection_is_outbound()),
             "Test assumption: All initial peers must represent outgoing connections."
         );
+
+        for i in 0..num_peers_incoming {
+            let peer_address =
+                std::net::SocketAddr::from_str(&format!("255.254.253.{}:8080", i)).unwrap();
+            state
+                .lock_guard_mut()
+                .await
+                .net
+                .peer_map
+                .insert(peer_address, get_dummy_peer_incoming(peer_address));
+        }
 
         let incoming_peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
@@ -1870,7 +1883,9 @@ mod test {
         #[tokio::test]
         #[traced_test]
         async fn sync_mode_abandoned_on_global_timeout() {
-            let test_setup = setup(0).await;
+            let num_outgoing_connections = 0;
+            let num_incoming_connections = 0;
+            let test_setup = setup(num_outgoing_connections, num_incoming_connections).await;
             let TestSetup {
                 task_join_handles,
                 mut main_loop_handler,
@@ -2011,7 +2026,9 @@ mod test {
         #[tokio::test]
         #[traced_test]
         async fn upgrade_proof_collection_to_single_proof_foreign_tx() {
-            let test_setup = setup(0).await;
+            let num_outgoing_connections = 0;
+            let num_incoming_connections = 0;
+            let test_setup = setup(num_outgoing_connections, num_incoming_connections).await;
             let TestSetup {
                 peer_to_main_rx,
                 miner_to_main_rx,
@@ -2149,13 +2166,45 @@ mod test {
     }
 
     mod peer_discovery {
+
         use super::*;
+
+        #[tokio::test]
+        #[traced_test]
+        async fn prune_peers_too_many_connections() {
+            let num_init_peers_outgoing = 10;
+            let num_init_peers_incoming = 4;
+            let test_setup = setup(num_init_peers_outgoing, num_init_peers_incoming).await;
+            let TestSetup {
+                mut main_to_peer_rx,
+                mut main_loop_handler,
+                ..
+            } = test_setup;
+
+            let mocked_cli = cli_args::Args {
+                max_num_peers: num_init_peers_outgoing as usize,
+                ..Default::default()
+            };
+
+            main_loop_handler
+                .global_state_lock
+                .set_cli(mocked_cli)
+                .await;
+
+            main_loop_handler.prune_peers().await.unwrap();
+            assert_eq!(4, main_to_peer_rx.len());
+            for _ in 0..4 {
+                let peer_msg = main_to_peer_rx.recv().await.unwrap();
+                assert!(matches!(peer_msg, MainToPeerTask::Disconnect(_)))
+            }
+        }
 
         #[tokio::test]
         #[traced_test]
         async fn no_warning_on_peer_exceeding_limit_if_connections_are_outgoing() {
             let num_init_peers_outgoing = 2;
-            let test_setup = setup(num_init_peers_outgoing).await;
+            let num_init_peers_incoming = 0;
+            let test_setup = setup(num_init_peers_outgoing, num_init_peers_incoming).await;
             let TestSetup {
                 task_join_handles,
                 mut main_loop_handler,
@@ -2189,13 +2238,14 @@ mod test {
         #[traced_test]
         async fn performs_peer_discovery_on_few_connections() {
             let num_init_peers_outgoing = 2;
+            let num_init_peers_incoming = 0;
             let TestSetup {
                 task_join_handles,
                 mut main_loop_handler,
                 mut main_to_peer_rx,
                 peer_to_main_rx: _keep_channel_open,
                 ..
-            } = setup(num_init_peers_outgoing).await;
+            } = setup(num_init_peers_outgoing, num_init_peers_incoming).await;
 
             // Set CLI to attempt to make more connections
             let mocked_cli = cli_args::Args {
@@ -2256,7 +2306,8 @@ mod test {
 
             let network = Network::Main;
             let num_init_peers_outgoing = 5;
-            let test_setup = setup(num_init_peers_outgoing).await;
+            let num_init_peers_incoming = 0;
+            let test_setup = setup(num_init_peers_outgoing, num_init_peers_incoming).await;
             let TestSetup {
                 mut peer_to_main_rx,
                 miner_to_main_rx: _,
