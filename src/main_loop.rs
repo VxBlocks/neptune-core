@@ -584,7 +584,7 @@ impl MainLoopHandler {
                     // Use block proposal and add expected UTXOs from this
                     // proposal.
                     let mut state = self.global_state_lock.lock_guard_mut().await;
-                    state.block_proposal =
+                    state.mining_state.block_proposal =
                         BlockProposal::own_proposal(block.clone(), expected_utxos.clone());
                     state.wallet_state.add_expected_utxos(expected_utxos).await;
                 }
@@ -848,7 +848,7 @@ impl MainLoopHandler {
                         return Ok(());
                     }
 
-                    global_state_mut.block_proposal =
+                    global_state_mut.mining_state.block_proposal =
                         BlockProposal::foreign_proposal(*block.clone());
                 }
 

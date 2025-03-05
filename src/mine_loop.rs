@@ -649,7 +649,7 @@ pub(crate) async fn mine(
                 (
                     !s.net.peer_map.is_empty(),
                     s.net.sync_anchor.is_some(),
-                    s.mining_status.clone(),
+                    s.mining_state.mining_status.clone(),
                 )
             })
             .await;
@@ -664,7 +664,12 @@ pub(crate) async fn mine(
         let (guesser_tx, guesser_rx) = oneshot::channel::<NewBlockFound>();
         let (composer_tx, composer_rx) = oneshot::channel::<(Block, Vec<ExpectedUtxo>)>();
 
-        let maybe_proposal = global_state_lock.lock_guard().await.block_proposal.clone();
+        let maybe_proposal = global_state_lock
+            .lock_guard()
+            .await
+            .mining_state
+            .block_proposal
+            .clone();
         let guess = cli_args.guess;
 
         let should_guess = !wait_for_confirmation

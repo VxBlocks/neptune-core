@@ -211,11 +211,16 @@ pub struct ProofOfWorkPuzzle {
     header_auth_path: [Digest; BlockHeader::MAST_HEIGHT],
 
     /// The threshold digest that defines when a PoW solution is valid. The
-    /// block's hash must less than or equal to this value.
+    /// block's hash must be less than or equal to this value.
     threshold: Digest,
 
-    /// The prize for the guesser if they solve the PoW puzzle.
+    /// The total reward, timelocked plus liquid, for a successful guess
     total_guesser_reward: NativeCurrencyAmount,
+
+    /// An identifier for the puzzle. Needed since more than one block proposal
+    /// may be known for the next block. A commitment to the entire block
+    /// kernel, apart from the nonce.
+    id: Digest,
 }
 
 impl ProofOfWorkPuzzle {
@@ -229,11 +234,14 @@ impl ProofOfWorkPuzzle {
         let (kernel_auth_path, header_auth_path) = precalculate_block_auth_paths(&block_proposal);
         let threshold = latest_block_header.difficulty.target();
 
+        let id = Tip5::hash(&(kernel_auth_path, header_auth_path));
+
         Self {
             kernel_auth_path,
             header_auth_path,
             threshold,
             total_guesser_reward: guesser_reward,
+            id,
         }
     }
 }
@@ -1333,11 +1341,6 @@ pub trait RPC {
     /// ```
     async fn cpu_temp(token: rpc_auth::Token) -> RpcResult<Option<f32>>;
 
-    /// Get the proof-of-work puzzle for the current block proposal.
-    ///
-    /// Returns `None` if no block proposal for the next block is known yet.
-    async fn pow_puzzle(token: rpc_auth::Token) -> RpcResult<Option<ProofOfWorkPuzzle>>;
-
     /******** BLOCKCHAIN STATISTICS ********/
     // Place all endpoints that relate to statistics of the blockchain here
 
@@ -1398,6 +1401,11 @@ pub trait RPC {
 
     /******** CHANGE THINGS ********/
     // Place all things that change state here
+
+    /// Get the proof-of-work puzzle for the current block proposal.
+    ///
+    /// Returns `None` if no block proposal for the next block is known yet.
+    async fn pow_puzzle(token: rpc_auth::Token) -> RpcResult<Option<ProofOfWorkPuzzle>>;
 
     /// Clears standing for all peers, connected or not
     ///
@@ -1745,7 +1753,11 @@ pub trait RPC {
     /// If the solution is considered valid by the running node, the new block
     /// is broadcast to all peers on the network, and `true` is returned.
     /// Otherwise the provided solution is ignored, and `false` is returned.
-    async fn provide_pow_solution(token: rpc_auth::Token, nonce: Digest) -> RpcResult<bool>;
+    async fn provide_pow_solution(
+        token: rpc_auth::Token,
+        nonce: Digest,
+        proposal_id: Digest,
+    ) -> RpcResult<bool>;
 
     /// mark MUTXOs as abandoned
     ///
@@ -2833,7 +2845,7 @@ impl RPC for NeptuneRPCServer {
         let peer_count = Some(state.net.peer_map.len());
         let max_num_peers = self.state.cli().max_num_peers;
 
-        let mining_status = Some(state.mining_status.clone());
+        let mining_status = Some(state.mining_state.mining_status.clone());
 
         let confirmations = {
             log_slow_scope!(fn_name!() + "::confirmations_internal()");
@@ -3121,20 +3133,24 @@ impl RPC for NeptuneRPCServer {
         _context: tarpc::context::Context,
         token: rpc_auth::Token,
         nonce: Digest,
+        proposal_id: Digest,
     ) -> RpcResult<bool> {
         log_slow_scope!(fn_name!());
         token.auth(&self.valid_tokens)?;
 
+        // Find proposal from list of exported proposals.
         let Some(mut proposal) = self
             .state
             .lock_guard()
             .await
-            .block_proposal
+            .mining_state
+            .exported_block_proposals
+            .get(&proposal_id)
             .map(|x| x.to_owned())
         else {
             warn!(
                 "Got claimed PoW solution but no challenge was known. \
-            Did solution come in too late?"
+                Did solution come in too late?"
             );
             return Ok(false);
         };
@@ -3240,7 +3256,7 @@ impl RPC for NeptuneRPCServer {
 
     // documented in trait. do not add doc-comment.
     async fn pow_puzzle(
-        self,
+        mut self,
         _context: tarpc::context::Context,
         token: rpc_auth::Token,
     ) -> RpcResult<Option<ProofOfWorkPuzzle>> {
@@ -3251,6 +3267,7 @@ impl RPC for NeptuneRPCServer {
             .state
             .lock_guard()
             .await
+            .mining_state
             .block_proposal
             .map(|x| x.to_owned())
         else {
@@ -3268,11 +3285,23 @@ impl RPC for NeptuneRPCServer {
             (guesser_key.after_image(), latest_block_header)
         };
 
-        Ok(Some(ProofOfWorkPuzzle::new(
-            proposal,
+        let puzzle = ProofOfWorkPuzzle::new(
+            proposal.clone(),
             guesser_key_after_image,
             latest_block_header,
-        )))
+        );
+
+        // Record block proposal in case of guesser-success, for later
+        // retrieval.
+        self.state
+            .lock_mut(|s| {
+                s.mining_state
+                    .exported_block_proposals
+                    .insert(puzzle.id, proposal)
+            })
+            .await;
+
+        Ok(Some(puzzle))
     }
 
     // documented in trait. do not add doc-comment.
@@ -4374,10 +4403,16 @@ mod rpc_server_tests {
             )
             .await;
             let bob_token = cookie_token(&bob).await;
-            assert!(!bob.state.lock_guard().await.block_proposal.is_some());
+            assert!(!bob
+                .state
+                .lock_guard()
+                .await
+                .mining_state
+                .block_proposal
+                .is_some());
             let accepted = bob
                 .clone()
-                .provide_pow_solution(context::current(), bob_token, random())
+                .provide_pow_solution(context::current(), bob_token, random(), random())
                 .await
                 .unwrap();
             assert!(
@@ -4396,7 +4431,10 @@ mod rpc_server_tests {
             let genesis = Block::genesis(network);
             let mut block1 = invalid_empty_block(&genesis);
             bob.state
-                .lock_mut(|x| x.block_proposal = BlockProposal::ForeignComposition(block1.clone()))
+                .lock_mut(|x| {
+                    x.mining_state.block_proposal =
+                        BlockProposal::ForeignComposition(block1.clone())
+                })
                 .await;
 
             let pow_puzzle = bob
@@ -4405,6 +4443,15 @@ mod rpc_server_tests {
                 .await
                 .unwrap()
                 .unwrap();
+            assert!(
+                bob.state
+                    .lock_guard()
+                    .await
+                    .mining_state
+                    .exported_block_proposals
+                    .contains_key(&pow_puzzle.id),
+                "Must have stored exported block proposal"
+            );
 
             let mock_nonce = random();
             let mut resulting_block_hash = fast_kernel_mast_hash(
@@ -4446,7 +4493,7 @@ mod rpc_server_tests {
             block1.set_header_nonce(actual_nonce);
             let good_is_accepted = bob
                 .clone()
-                .provide_pow_solution(context::current(), bob_token, actual_nonce)
+                .provide_pow_solution(context::current(), bob_token, actual_nonce, pow_puzzle.id)
                 .await
                 .unwrap();
             assert!(
@@ -4466,7 +4513,7 @@ mod rpc_server_tests {
             }
             let bad_is_accepted = bob
                 .clone()
-                .provide_pow_solution(context::current(), bob_token, bad_nonce)
+                .provide_pow_solution(context::current(), bob_token, bad_nonce, pow_puzzle.id)
                 .await
                 .unwrap();
             assert!(
