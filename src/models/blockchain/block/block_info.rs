@@ -19,6 +19,7 @@ use crate::prelude::twenty_first;
 pub struct BlockInfo {
     pub height: BlockHeight,
     pub digest: Digest,
+    pub nonce: Digest,
     pub prev_block_digest: Digest,
     pub timestamp: Timestamp,
     pub cumulative_proof_of_work: ProofOfWork,
@@ -39,6 +40,7 @@ impl std::fmt::Display for BlockInfo {
         let buf = String::new()
             + &format!("height: {}\n", self.height)
             + &format!("digest: {}\n", self.digest.to_hex())
+            + &format!("nonce: {}\n", self.nonce.to_hex())
             + &format!("prev_block_digest: {}\n", self.prev_block_digest.to_hex())
             + &format!("timestamp: {}\n", self.timestamp.standard_format())
             + &format!(
@@ -75,6 +77,7 @@ impl BlockInfo {
         let digest = block.hash();
         Self {
             digest,
+            nonce: header.nonce,
             prev_block_digest: header.prev_block_digest,
             height: header.height,
             timestamp: header.timestamp,
