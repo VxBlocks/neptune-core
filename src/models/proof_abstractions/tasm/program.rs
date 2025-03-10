@@ -67,6 +67,7 @@ where
         triton_vm_job_queue: &TritonVmJobQueue,
         proof_job_options: TritonVmProofJobOptions,
     ) -> anyhow::Result<Proof> {
+        println!("========add job program 33 to queue");
         prove_consensus_program(
             self.program(),
             claim,
@@ -567,6 +568,7 @@ pub mod test {
         // Ensure file exists on machine, in case this machine syncs automatically with proof server
         let program = triton_program!(halt);
         let claim = Claim::about_program(&program);
+        println!("========add job program 44 to queue");
         prove_consensus_program(
             program,
             claim.clone(),
@@ -599,7 +601,7 @@ pub mod test {
         create_dir_all(&path)
             .unwrap_or_else(|_| panic!("cannot create '{TEST_DATA_DIR}' directory"));
         path.push(Path::new(&name));
-
+        println!("========add job triton_vm 33 to queue");
         let proof = triton_vm::prove(Stark::default(), claim, program, nondeterminism)
             .expect("cannot produce proof");
 

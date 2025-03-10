@@ -8,11 +8,12 @@
 //!
 //! The queue is used to ensure that only one triton-vm
 //! program can execute at a time.
-#[cfg(not(test))]
+//! 
+#[cfg(not(testabc))]
 use std::process::Stdio;
 
 use tasm_lib::maybe_write_debuggable_vm_state_to_disk;
-#[cfg(not(test))]
+#[cfg(not(testabc))]
 use tokio::io::AsyncWriteExt;
 
 use crate::job_queue::traits::Job;
@@ -21,7 +22,7 @@ use crate::job_queue::traits::JobCompletion;
 use crate::job_queue::traits::JobResult;
 use crate::macros::fn_name;
 use crate::macros::log_scope_duration;
-#[cfg(test)]
+#[cfg(testabc)]
 use crate::models::proof_abstractions::tasm::program::test;
 use crate::models::proof_abstractions::Claim;
 use crate::models::proof_abstractions::NonDeterminism;
@@ -238,7 +239,7 @@ impl ProverJob {
     /// there, generate it and store it to disk.
     async fn prove(&self, rx: JobCancelReceiver) -> JobCompletion {
         // todo: make test version async, cancellable.
-        #[cfg(test)]
+        #[cfg(testabc)]
         {
             // avoid some 'unused' compiler warnings.
             let _dummy = rx;
@@ -251,7 +252,7 @@ impl ProverJob {
             );
             ProverProcessCompletion::Finished(proof).into()
         }
-        #[cfg(not(test))]
+        #[cfg(not(testabc))]
         {
             // invoke external prover
             self.prove_out_of_process(rx).await.into()
@@ -287,11 +288,13 @@ impl ProverJob {
     ///
     /// The process result is only read if exit code is 0.
     /// A non-zero exit code or no code results in an error.
-    #[cfg(not(test))]
+    #[cfg(not(testabc))]
     async fn prove_out_of_process(
         &self,
         mut rx: JobCancelReceiver,
     ) -> Result<ProverProcessCompletion, VmProcessError> {
+        
+
         // start child process
         let mut child = {
             let inputs = [
@@ -304,7 +307,7 @@ impl ProverJob {
                 .kill_on_drop(true) // extra insurance.
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null()) // ignore stderr
+                .stderr(Stdio::inherit()) // ignore stderr
                 .spawn()?;
 
             let mut child_stdin = child.stdin.take().ok_or(VmProcessError::StdinUnavailable)?;
@@ -326,6 +329,7 @@ impl ProverJob {
                 let output = result?;
                 match output.status.code() {
                     Some(0) => {
+                        println!("===proof ");
                         let proof: Proof = bincode::deserialize(&output.stdout)?;
                         tracing::info!(
                             "Generated proof, with padded height: {}",
@@ -358,7 +362,7 @@ impl ProverJob {
     ///
     /// note: we do not verify that the path exists. That will occur anyway
     /// when triton-vm-prover is executed.
-    #[cfg(not(test))]
+    #[cfg(not(testabc))]
     fn path_to_triton_vm_prover() -> Result<std::path::PathBuf, std::io::Error> {
         let mut exe_path = std::env::current_exe()?;
         exe_path.set_file_name("triton-vm-prover");
@@ -412,7 +416,7 @@ impl Job for ProverJob {
 }
 
 // future cleanup: remove this module, when possible.
-#[cfg(not(test))]
+#[cfg(not(testabc))]
 mod process_util {
 
     use std::process::Output;

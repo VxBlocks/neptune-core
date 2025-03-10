@@ -112,6 +112,7 @@ impl TypeScriptAndWitness {
             .flat_map(|d| d.reversed().values())
             .collect_vec();
         let claim = Claim::new(self.program.hash()).with_input(input);
+        println!("========add job program 22 to queue");
         prove_consensus_program(
             self.program.clone(),
             claim,

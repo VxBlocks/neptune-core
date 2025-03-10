@@ -1069,9 +1069,9 @@ impl WalletState {
                                 ),
                                 None => String::from("No info about when UTXO was confirmed."),
                             };
-                            warn!(
-                            "Unable to find valid membership proof for UTXO with addition record {addition_record}. {confirmed_in_block_info} Current block height is {}", new_block.kernel.header.height
-                        );
+                        //     warn!(
+                        //     "Unable to find valid membership proof for UTXO with addition record {addition_record}. {confirmed_in_block_info} Current block height is {}", new_block.kernel.header.height
+                        // );
                         }
                     }
                 }

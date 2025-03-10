@@ -1198,7 +1198,7 @@ impl MainLoopHandler {
         let chosen_peer = chosen_peer.unwrap();
         info!(
             "Sending block batch request to {}\nrequesting blocks descending from {}\n height {}",
-            chosen_peer, own_tip_hash, own_tip_height
+            chosen_peer, own_tip_hash.to_hex(), own_tip_height
         );
         self.main_to_peer_broadcast_tx
             .send(MainToPeerTask::RequestBlockBatch(

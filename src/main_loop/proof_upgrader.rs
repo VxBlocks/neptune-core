@@ -477,7 +477,7 @@ impl UpgradeJob {
                 let single_proof_witness = SingleProofWitness::from_collection(proof.to_owned());
                 let claim = single_proof_witness.claim();
                 let nondeterminism = single_proof_witness.nondeterminism();
-                info!("Proof-upgrader: Start generate single proof");
+                info!("===== Proof-upgrader: Start generate single proof");
                 let single_proof = SingleProof
                     .prove(
                         claim,

@@ -1,3 +1,4 @@
+use std::io::stderr;
 use std::io::BufRead;
 use std::io::Write;
 
@@ -15,6 +16,10 @@ fn main() {
     //
     // todo: we could accept a thread-prioritycli param (0..100) and
     //       pass it with ThreadPriority::CrossPlatform(x).
+    let _ = writeln!(
+        stderr(),
+        "triton-vm: setting thread priority"
+    );
     set_current_thread_priority(ThreadPriority::Min).unwrap();
 
     let stdin = std::io::stdin();

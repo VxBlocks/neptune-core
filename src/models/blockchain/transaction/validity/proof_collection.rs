@@ -101,7 +101,7 @@ impl ProofCollection {
         debug!("proving, salted outputs hash: {}", salted_outputs_hash);
 
         // prove
-        debug!("proving RemovalRecordsIntegrity");
+        info!(" ==== proving RemovalRecordsIntegrity");
         let removal_records_integrity = RemovalRecordsIntegrity
             .prove(
                 removal_records_integrity_witness.claim(),
@@ -111,7 +111,7 @@ impl ProofCollection {
             )
             .await?;
 
-        debug!("proving CollectLockScripts");
+        info!(" ===== proving CollectLockScripts");
         let collect_lock_scripts = CollectLockScripts
             .prove(
                 collect_lock_scripts_witness.claim(),
@@ -121,7 +121,7 @@ impl ProofCollection {
             )
             .await?;
 
-        debug!("proving KernelToOutputs");
+        info!("====== proving KernelToOutputs");
         let kernel_to_outputs = KernelToOutputs
             .prove(
                 kernel_to_outputs_witness.claim(),
@@ -131,7 +131,7 @@ impl ProofCollection {
             )
             .await?;
 
-        debug!("proving CollectTypeScripts");
+        info!("=======proving CollectTypeScripts");
         let collect_type_scripts = CollectTypeScripts
             .prove(
                 collect_type_scripts_witness.claim(),
@@ -141,7 +141,7 @@ impl ProofCollection {
             )
             .await?;
 
-        debug!("proving lock scripts");
+        info!("=====proving lock scripts");
         let mut lock_scripts_halt = vec![];
         for lock_script_and_witness in primitive_witness.lock_scripts_and_witnesses.iter() {
             lock_scripts_halt.push(
@@ -162,7 +162,7 @@ impl ProofCollection {
             .iter()
             .enumerate()
         {
-            debug!("proving type script number {i}: {}", tsaw.program.hash());
+            info!("=======proving type script number {i}: {}", tsaw.program.hash());
             type_scripts_halt.push(
                 tsaw.prove(
                     txk_mast_hash,

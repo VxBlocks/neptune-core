@@ -437,6 +437,9 @@ impl GlobalState {
         }
 
         let maybe_existing_fee = self.block_proposal.map(|x| x.total_guesser_reward());
+        if maybe_existing_fee.is_some() {
+            info!("incoming block proposal has higher fee than current proposal {}, {}", maybe_existing_fee.unwrap(), incoming_guesser_fee)
+        }
         if maybe_existing_fee.is_some_and(|current| current >= incoming_guesser_fee)
             || incoming_guesser_fee.is_zero()
         {

@@ -781,7 +781,9 @@ async fn main() -> Result<()> {
         Command::BlockInfo { block_selector } => {
             let data = client.block_info(ctx, token, block_selector).await??;
             match data {
-                Some(block_info) => println!("{}", block_info),
+                Some(block_info) => {
+                    println!("{}", serde_json::to_string(&block_info)?)
+                },
                 None => println!("Not found"),
             }
         }

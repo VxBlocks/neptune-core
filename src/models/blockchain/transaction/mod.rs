@@ -205,7 +205,7 @@ impl Transaction {
         let new_single_proof_witness = SingleProofWitness::from_update(update_witness);
         let new_single_proof_claim = new_single_proof_witness.claim();
 
-        info!("starting single proof via update ...");
+        info!("======= starting single proof via update ...");
         let new_single_proof = SingleProof
             .prove(
                 new_single_proof_claim,
@@ -270,7 +270,7 @@ impl Transaction {
         let new_kernel = merge_witness.new_kernel.clone();
         let new_single_proof_witness = SingleProofWitness::from_merge(merge_witness);
         let new_single_proof_claim = new_single_proof_witness.claim();
-        info!("Start: creating new single proof through merge");
+        info!("====== Start: creating new single proof through merge");
         let new_single_proof = SingleProof
             .prove(
                 new_single_proof_claim,

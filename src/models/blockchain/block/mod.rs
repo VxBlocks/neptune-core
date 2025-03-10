@@ -221,6 +221,7 @@ impl Block {
             let block_proof_witness = BlockProofWitness::produce(primitive_witness).await?;
             let appendix = block_proof_witness.appendix();
             let claim = BlockProgram::claim(&body, &appendix);
+            println!("====== block_template_from_block_primitive_witness prover");
             let proof = BlockProgram
                 .prove(
                     claim,

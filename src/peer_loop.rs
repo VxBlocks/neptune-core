@@ -1450,6 +1450,7 @@ impl PeerLoopHandler {
                 Ok(KEEP_CONNECTION_ALIVE)
             }
             PeerMessage::BlockProposalNotification(block_proposal_notification) => {
+                info!("Got block proposal notification from peer. height = {} {}", block_proposal_notification.height, block_proposal_notification.guesser_fee);
                 let verdict = self
                     .global_state_lock
                     .lock_guard()

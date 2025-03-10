@@ -240,7 +240,7 @@ impl SingleProof {
         let claim = single_proof_witness.claim();
         let nondeterminism = single_proof_witness.nondeterminism();
 
-        info!("Start: generate single proof");
+        info!("== Start: generate single proof");
         let single_proof = SingleProof
             .prove(
                 claim,
