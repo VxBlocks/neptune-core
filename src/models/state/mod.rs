@@ -3,6 +3,7 @@ pub mod block_proposal;
 pub mod blockchain_state;
 pub mod light_state;
 pub mod mempool;
+pub mod mining_state;
 pub mod mining_status;
 pub mod networking_state;
 pub mod shared;
@@ -25,6 +26,7 @@ use block_proposal::BlockProposal;
 use blockchain_state::BlockchainState;
 use mempool::Mempool;
 use mempool::TransactionOrigin;
+use mining_state::MiningState;
 use mining_status::ComposingWorkInfo;
 use mining_status::GuessingWorkInfo;
 use mining_status::MiningStatus;
@@ -181,7 +183,7 @@ impl GlobalStateLock {
 
     // check if mining
     pub async fn mining(&self) -> bool {
-        self.lock(|s| match s.mining_status {
+        self.lock(|s| match s.mining_state.mining_status {
             MiningStatus::Guessing(_) => true,
             MiningStatus::Composing(_) => true,
             MiningStatus::Inactive => false,
@@ -190,7 +192,7 @@ impl GlobalStateLock {
     }
 
     pub async fn set_mining_status_to_inactive(&mut self) {
-        self.lock_guard_mut().await.mining_status = MiningStatus::Inactive;
+        self.lock_guard_mut().await.mining_state.mining_status = MiningStatus::Inactive;
         tracing::debug!("set mining status: inactive");
     }
 
@@ -198,7 +200,7 @@ impl GlobalStateLock {
     pub async fn set_mining_status_to_guessing(&mut self, block: &Block) {
         let now = SystemTime::now();
         let block_info = GuessingWorkInfo::new(now, block);
-        self.lock_guard_mut().await.mining_status = MiningStatus::Guessing(block_info);
+        self.lock_guard_mut().await.mining_state.mining_status = MiningStatus::Guessing(block_info);
         tracing::debug!("set mining status: guessing");
     }
 
@@ -206,7 +208,7 @@ impl GlobalStateLock {
     pub async fn set_mining_status_to_composing(&mut self) {
         let now = SystemTime::now();
         let work_info = ComposingWorkInfo::new(now);
-        self.lock_guard_mut().await.mining_status = MiningStatus::Composing(work_info);
+        self.lock_guard_mut().await.mining_state.mining_status = MiningStatus::Composing(work_info);
         tracing::debug!("set mining status: composing");
     }
 
@@ -302,13 +304,8 @@ pub struct GlobalState {
     /// The `Mempool` may only be updated by the main task.
     pub mempool: Mempool,
 
-    /// The block proposal to which guessers contribute proof-of-work.
-    pub(crate) block_proposal: BlockProposal,
-
-    /// Indicates whether the guessing or composing task is running, and if so,
-    /// since when.
-    // Only the mining task should write to this, anyone can read.
-    pub(crate) mining_status: MiningStatus,
+    /// The `mining_state` can be updated by main task, mining task, or RPC server.
+    pub(crate) mining_state: MiningState,
 }
 
 impl GlobalState {
@@ -325,8 +322,7 @@ impl GlobalState {
             net,
             cli,
             mempool,
-            block_proposal: BlockProposal::default(),
-            mining_status: MiningStatus::Inactive,
+            mining_state: MiningState::default(),
         }
     }
 
@@ -334,7 +330,7 @@ impl GlobalState {
     pub(crate) fn shuffle_seed(&self) -> [u8; 32] {
         let next_block_height = self.chain.light_state().header().height.next();
         self.wallet_state
-            .wallet_secret
+            .wallet_entropy
             .shuffle_seed(next_block_height)
     }
 
@@ -406,7 +402,7 @@ impl GlobalState {
         let next_block_height: BlockHeight = self.chain.light_state().header().height.next();
         let sender_randomness_for_composer = self
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .generate_sender_randomness(next_block_height, reward_address.privacy_digest());
 
         ComposerParameters::new(
@@ -436,7 +432,10 @@ impl GlobalState {
             });
         }
 
-        let maybe_existing_fee = self.block_proposal.map(|x| x.total_guesser_reward());
+        let maybe_existing_fee = self
+            .mining_state
+            .block_proposal
+            .map(|x| x.total_guesser_reward());
         if maybe_existing_fee.is_some_and(|current| current >= incoming_guesser_fee)
             || incoming_guesser_fee.is_zero()
         {
@@ -496,9 +495,7 @@ impl GlobalState {
         // of stream_values() we use stream_many_values() and supply
         // an iterator of indexes that are already reversed.
 
-        let stream = monitored_utxos
-            .stream_many_values((0..monitored_utxos.len().await).rev())
-            .await;
+        let stream = monitored_utxos.stream_many_values((0..monitored_utxos.len().await).rev());
         pin_mut!(stream); // needed for iteration
 
         while let Some(mutxo) = stream.next().await {
@@ -594,7 +591,7 @@ impl GlobalState {
         };
 
         let receiver_digest = own_receiving_address.privacy_digest();
-        let change_sender_randomness = self.wallet_state.wallet_secret.generate_sender_randomness(
+        let change_sender_randomness = self.wallet_state.wallet_entropy.generate_sender_randomness(
             self.chain.light_state().kernel.header.height,
             receiver_digest,
         );
@@ -641,7 +638,7 @@ impl GlobalState {
             .map(|(address, amount)| {
                 let sender_randomness = self
                     .wallet_state
-                    .wallet_secret
+                    .wallet_entropy
                     .generate_sender_randomness(block_height, address.privacy_digest());
 
                 // The UtxoNotifyMethod (Onchain or Offchain) is auto-detected
@@ -762,7 +759,7 @@ impl GlobalState {
     /// Variant of [Self::create_transaction] that allows caller to specify
     /// prover capability. [Self::create_transaction] is the preferred interface
     /// for anything but tests.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn create_transaction_with_prover_capability(
         &self,
         mut tx_outputs: TxOutputList,
@@ -925,7 +922,7 @@ impl GlobalState {
         Ok(Transaction { kernel, proof })
     }
 
-    pub(crate) async fn get_own_handshakedata(&self) -> HandshakeData {
+    pub(crate) fn get_own_handshakedata(&self) -> HandshakeData {
         let listen_port = self.cli().own_listen_port();
         HandshakeData {
             tip_header: *self.chain.light_state().header(),
@@ -956,7 +953,7 @@ impl GlobalState {
         let tip_hash = self.chain.light_state().hash();
         let ams_ref = &self.chain.archival_state().archival_mutator_set;
 
-        let asm_sync_label = ams_ref.get_sync_label().await;
+        let asm_sync_label = ams_ref.get_sync_label();
         assert_eq!(
             tip_hash, asm_sync_label,
             "Error: sync label in archival mutator set database disagrees with \
@@ -1073,8 +1070,10 @@ impl GlobalState {
                 Err(err) => bail!("Could not restore MS membership proof. Got: {err}"),
             };
 
-            let mut restored_mutxo =
-                MonitoredUtxo::new(incoming_utxo.utxo, self.wallet_state.number_of_mps_per_utxo);
+            let mut restored_mutxo = MonitoredUtxo::new(
+                incoming_utxo.utxo,
+                self.wallet_state.configuration.num_mps_per_utxo,
+            );
             restored_mutxo.add_membership_proof_for_tip(tip_hash, restored_msmp);
 
             // Add block info for restored MUTXO
@@ -1148,15 +1147,11 @@ impl GlobalState {
 
             // If the UTXO was not confirmed yet, there is no
             // point in synchronizing its membership proof.
-            let (confirming_block_digest, confirming_block_height) =
-                match monitored_utxo.confirmed_in_block {
-                    Some((confirmed_block_hash, _timestamp, block_height)) => {
-                        (confirmed_block_hash, block_height)
-                    }
-                    None => {
-                        continue;
-                    }
-                };
+            let Some((confirming_block_digest, _, confirming_block_height)) =
+                monitored_utxo.confirmed_in_block
+            else {
+                continue;
+            };
 
             // try latest (block hash, membership proof) entry
             let (block_hash, mut membership_proof) = monitored_utxo
@@ -1174,7 +1169,7 @@ impl GlobalState {
             let mut monitored_utxo = monitored_utxo.clone();
 
             // walk backwards, reverting
-            for revert_block_hash in backwards.into_iter() {
+            for revert_block_hash in backwards {
                 // Was the UTXO confirmed in this block? If so, there
                 // is nothing we can do except orphan the UTXO: that
                 // is, leave it without a synced membership proof.
@@ -1227,7 +1222,7 @@ impl GlobalState {
             }
 
             // walk forwards, applying
-            for apply_block_hash in forwards.into_iter() {
+            for apply_block_hash in forwards {
                 // Was the UTXO confirmed in this block?
                 // This can occur in some edge cases of forward-only
                 // resynchronization. In this case, assume the
@@ -1257,7 +1252,7 @@ impl GlobalState {
                 } = apply_block.mutator_set_update();
 
                 // apply additions
-                for addition_record in additions.iter() {
+                for addition_record in &additions {
                     membership_proof
                         .update_from_addition(
                             Hash::hash(&monitored_utxo.utxo),
@@ -1269,7 +1264,7 @@ impl GlobalState {
                 }
 
                 // apply removals
-                for removal_record in removals.iter() {
+                for removal_record in &removals {
                     membership_proof.update_from_remove(removal_record);
                     block_msa.remove(removal_record);
                 }
@@ -1505,8 +1500,9 @@ impl GlobalState {
         self.chain.light_state_mut().set_block(new_block);
 
         // Reset block proposal, as that field pertains to the block that
-        // was just set as new tip.
-        self.block_proposal = BlockProposal::none();
+        // was just set as new tip. Also reset set of exported block proposals.
+        self.mining_state.block_proposal = BlockProposal::none();
+        self.mining_state.exported_block_proposals.clear();
 
         // Flush databases
         self.flush_databases().await?;
@@ -1731,7 +1727,7 @@ mod global_state_tests {
     use wallet::address::generation_address::GenerationSpendingKey;
     use wallet::address::KeyType;
     use wallet::expected_utxo::UtxoNotifier;
-    use wallet::WalletSecret;
+    use wallet::wallet_entropy::WalletEntropy;
 
     use super::*;
     use crate::config_models::network::Network;
@@ -1739,6 +1735,7 @@ mod global_state_tests {
     use crate::models::blockchain::block::Block;
     use crate::models::state::wallet::address::hash_lock_key::HashLockKey;
     use crate::tests::shared::fake_valid_successor_for_tests;
+    use crate::tests::shared::invalid_empty_block;
     use crate::tests::shared::make_mock_block;
     use crate::tests::shared::make_mock_block_guesser_preimage_and_guesser_fraction;
     use crate::tests::shared::mock_genesis_global_state;
@@ -1752,14 +1749,13 @@ mod global_state_tests {
             mock_genesis_global_state(
                 Network::Main,
                 2,
-                WalletSecret::devnet_wallet(),
+                WalletEntropy::devnet_wallet(),
                 cli_args::Args::default(),
             )
             .await
             .lock_guard()
             .await
-            .get_own_handshakedata()
-            .await;
+            .get_own_handshakedata();
         }
 
         #[traced_test]
@@ -1769,7 +1765,7 @@ mod global_state_tests {
             let bob = mock_genesis_global_state(
                 network,
                 2,
-                WalletSecret::devnet_wallet(),
+                WalletEntropy::devnet_wallet(),
                 cli_args::Args::default(),
             )
             .await;
@@ -1778,8 +1774,7 @@ mod global_state_tests {
                 .global_state_lock
                 .lock_guard()
                 .await
-                .get_own_handshakedata()
-                .await;
+                .get_own_handshakedata();
             assert!(handshake_data.listen_port.is_some());
         }
 
@@ -1790,7 +1785,7 @@ mod global_state_tests {
             let mut bob = mock_genesis_global_state(
                 network,
                 2,
-                WalletSecret::devnet_wallet(),
+                WalletEntropy::devnet_wallet(),
                 cli_args::Args::default(),
             )
             .await;
@@ -1804,10 +1799,38 @@ mod global_state_tests {
                 .global_state_lock
                 .lock_guard()
                 .await
-                .get_own_handshakedata()
-                .await;
+                .get_own_handshakedata();
             assert!(handshake_data.listen_port.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn set_new_tip_clears_block_proposal_related_data() {
+        let network = Network::Main;
+        let mut bob = mock_genesis_global_state(
+            network,
+            2,
+            WalletEntropy::devnet_wallet(),
+            cli_args::Args::default(),
+        )
+        .await;
+        let mut bob = bob.global_state_lock.lock_guard_mut().await;
+        let block1 = invalid_empty_block(&Block::genesis(network));
+
+        bob.mining_state.block_proposal = BlockProposal::ForeignComposition(block1.clone());
+        bob.mining_state
+            .exported_block_proposals
+            .insert(random(), block1.clone());
+
+        bob.set_new_tip(block1).await.unwrap();
+        assert!(
+            bob.mining_state.block_proposal.is_none(),
+            "block proposal must be reset after setting new tip."
+        );
+        assert!(
+            bob.mining_state.exported_block_proposals.is_empty(),
+            "Set of exported block proposals must be empty after registering new block"
+        );
     }
 
     #[traced_test]
@@ -1816,11 +1839,11 @@ mod global_state_tests {
         let network = Network::Main;
         let mut rng = StdRng::seed_from_u64(u64::from_str_radix("3014221", 6).unwrap());
 
-        let alice = WalletSecret::new_pseudorandom(rng.random());
+        let alice = WalletEntropy::new_pseudorandom(rng.random());
         let bob = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
@@ -1840,7 +1863,7 @@ mod global_state_tests {
             .lock_guard()
             .await
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .nth_generation_spending_key_for_tests(0);
 
         let genesis_block = Block::genesis(network);
@@ -1945,7 +1968,7 @@ mod global_state_tests {
     async fn restore_monitored_utxos_from_recovery_data_test() {
         let network = Network::Main;
         let mut rng = rand::rng();
-        let wallet = WalletSecret::devnet_wallet();
+        let wallet = WalletEntropy::devnet_wallet();
         let own_key = wallet.nth_generation_spending_key_for_tests(0);
         let mut global_state_lock =
             mock_genesis_global_state(network, 2, wallet.clone(), cli_args::Args::default()).await;
@@ -2118,13 +2141,13 @@ mod global_state_tests {
         let mut alice_state_lock = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
         let mut alice = alice_state_lock.lock_guard_mut().await;
 
-        let bob_wallet_secret = WalletSecret::new_random();
+        let bob_wallet_secret = WalletEntropy::new_random();
         let bob_key = bob_wallet_secret.nth_generation_spending_key(0);
 
         // 1. Create new block 1 and store it
@@ -2176,14 +2199,14 @@ mod global_state_tests {
         let mut alice = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
         let mut alice = alice.lock_guard_mut().await;
         let alice_key = alice
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .nth_generation_spending_key(0);
 
         // 1. Create new block 1a where we receive a coinbase UTXO, store it
@@ -2214,7 +2237,7 @@ mod global_state_tests {
 
         // Make a new fork from genesis that makes us lose the composer UTXOs
         // of block 1a.
-        let bob_wallet_secret = WalletSecret::new_random();
+        let bob_wallet_secret = WalletEntropy::new_random();
         let bob_key = bob_wallet_secret.nth_generation_spending_key(0);
         let mut parent_block = genesis_block;
         for _ in 0..5 {
@@ -2303,16 +2326,16 @@ mod global_state_tests {
         let mut alice = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
         let mut alice = alice.lock_guard_mut().await;
         let alice_key = alice
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .nth_generation_spending_key(0);
-        let bob_secret = WalletSecret::new_random();
+        let bob_secret = WalletEntropy::new_random();
         let bob_key = bob_secret.nth_generation_spending_key(0);
 
         // 1. Create new block 1 where Alice receives two composer UTXOs, store it.
@@ -2343,7 +2366,7 @@ mod global_state_tests {
 
         // Add 60 blocks on top of 1, *not* mined by Alice
         let fork_a_block = a_blocks.last().unwrap().to_owned();
-        for branch_block in a_blocks.into_iter() {
+        for branch_block in a_blocks {
             alice.set_new_tip(branch_block).await.unwrap();
         }
 
@@ -2360,7 +2383,7 @@ mod global_state_tests {
 
         // Fork away from the "a" chain to the "b" chain, with block 1 as LUCA
         let fork_b_block = b_blocks.last().unwrap().to_owned();
-        for branch_block in b_blocks.into_iter() {
+        for branch_block in b_blocks {
             alice.set_new_tip(branch_block).await.unwrap();
         }
 
@@ -2401,7 +2424,7 @@ mod global_state_tests {
         // Make a new chain c with genesis block as LUCA. Verify that the genesis UTXO can be synced
         // to this new chain
         let fork_c_block = c_blocks.last().unwrap().to_owned();
-        for branch_block in c_blocks.into_iter() {
+        for branch_block in c_blocks {
             alice.set_new_tip(branch_block).await.unwrap();
         }
 
@@ -2473,7 +2496,7 @@ mod global_state_tests {
         let mut premine_receiver = mock_genesis_global_state(
             network,
             3,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
@@ -2481,16 +2504,16 @@ mod global_state_tests {
             .lock_guard()
             .await
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .nth_generation_spending_key_for_tests(0);
 
-        let wallet_secret_alice = WalletSecret::new_pseudorandom(rng.random());
+        let wallet_secret_alice = WalletEntropy::new_pseudorandom(rng.random());
         let alice_spending_key = wallet_secret_alice.nth_generation_spending_key_for_tests(0);
         let mut alice =
             mock_genesis_global_state(network, 3, wallet_secret_alice, cli_args::Args::default())
                 .await;
 
-        let wallet_secret_bob = WalletSecret::new_pseudorandom(rng.random());
+        let wallet_secret_bob = WalletEntropy::new_pseudorandom(rng.random());
         let bob_spending_key = wallet_secret_bob.nth_generation_spending_key_for_tests(0);
         let mut bob =
             mock_genesis_global_state(network, 3, wallet_secret_bob, cli_args::Args::default())
@@ -2873,7 +2896,7 @@ mod global_state_tests {
         let mut global_state_lock = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
@@ -2934,7 +2957,7 @@ mod global_state_tests {
         let mut global_state_lock = mock_genesis_global_state(
             network,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default_with_network(network),
         )
         .await;
@@ -2952,7 +2975,8 @@ mod global_state_tests {
             "Must favor low guesser fee over none"
         );
 
-        state.block_proposal = BlockProposal::foreign_proposal(small_guesser_fraction.clone());
+        state.mining_state.block_proposal =
+            BlockProposal::foreign_proposal(small_guesser_fraction.clone());
         assert!(
             state
                 .favor_incoming_block_proposal(
@@ -2963,7 +2987,8 @@ mod global_state_tests {
             "Must favor big guesser fee over low"
         );
 
-        state.block_proposal = BlockProposal::foreign_proposal(big_guesser_fraction.clone());
+        state.mining_state.block_proposal =
+            BlockProposal::foreign_proposal(big_guesser_fraction.clone());
         assert_eq!(
             BlockProposalRejectError::InsufficientFee {
                 current: Some(big_guesser_fraction.total_guesser_reward()),
@@ -3002,9 +3027,8 @@ mod global_state_tests {
                     .chain
                     .archival_state()
                     .archival_mutator_set
-                    .get_sync_label()
-                    .await,
-                "Archival state must have expected sync-label"
+                    .get_sync_label(),
+                "Archival state must have expected sync-label",
             );
             assert_eq!(
                 expected_tip.mutator_set_accumulator_after(),
@@ -3132,7 +3156,7 @@ mod global_state_tests {
             let network = Network::Main;
             let mut rng = rand::rng();
             let genesis_block = Block::genesis(network);
-            let wallet_secret = WalletSecret::devnet_wallet();
+            let wallet_secret = WalletEntropy::devnet_wallet();
             let spending_key = wallet_secret.nth_generation_spending_key(0);
 
             let mut global_state_lock = mock_genesis_global_state(
@@ -3203,7 +3227,7 @@ mod global_state_tests {
             let network = Network::Main;
             let mut rng = rand::rng();
             let genesis_block = Block::genesis(network);
-            let wallet_secret = WalletSecret::new_random();
+            let wallet_secret = WalletEntropy::new_random();
 
             let mut alice = mock_genesis_global_state(
                 network,
@@ -3216,7 +3240,7 @@ mod global_state_tests {
             let mut alice = alice.global_state_lock.lock_guard_mut().await;
             assert_eq!(genesis_block.hash(), alice.chain.light_state().hash());
 
-            let cb_key = WalletSecret::new_random().nth_generation_spending_key(0);
+            let cb_key = WalletEntropy::new_random().nth_generation_spending_key(0);
             let (block_1, _) = make_mock_block(&genesis_block, None, cb_key, rng.random()).await;
 
             alice.store_block_not_tip(block_1.clone()).await.unwrap();
@@ -3241,7 +3265,7 @@ mod global_state_tests {
             length: usize,
         ) -> Vec<(Block, Block)> {
             let mut rng = rand::rng();
-            let cb_key = WalletSecret::new_random().nth_generation_spending_key(0);
+            let cb_key = WalletEntropy::new_random().nth_generation_spending_key(0);
             let mut parent = Block::genesis(network);
             let mut chain = vec![];
             for _ in 0..length {
@@ -3257,7 +3281,7 @@ mod global_state_tests {
         #[tokio::test]
         async fn can_jump_to_new_tip_over_blocks_that_were_never_tips() {
             let network = Network::Main;
-            let wallet_secret = WalletSecret::new_random();
+            let wallet_secret = WalletEntropy::new_random();
             let mut alice = mock_genesis_global_state(
                 network,
                 2,
@@ -3269,7 +3293,7 @@ mod global_state_tests {
 
             let a_length = 12;
             let chain_a = chain_of_blocks_and_parents(network, a_length).await;
-            for (block, _) in chain_a.iter() {
+            for (block, _) in &chain_a {
                 alice.set_new_tip(block.to_owned()).await.unwrap();
             }
 
@@ -3324,7 +3348,7 @@ mod global_state_tests {
             // build upon blocks stored through the former method.
             let network = Network::Main;
             let genesis_block = Block::genesis(network);
-            let wallet_secret = WalletSecret::new_random();
+            let wallet_secret = WalletEntropy::new_random();
 
             for depth in 1..=4 {
                 let mut alice = mock_genesis_global_state(
@@ -3339,7 +3363,7 @@ mod global_state_tests {
                 let chain_a = chain_of_blocks_and_parents(network, depth).await;
                 let chain_b = chain_of_blocks_and_parents(network, depth).await;
                 let blocks_and_parents = [chain_a, chain_b].concat();
-                for (block, _) in blocks_and_parents.iter() {
+                for (block, _) in &blocks_and_parents {
                     alice.store_block_not_tip(block.clone()).await.unwrap();
                     assert_eq!(
                         genesis_block.hash(),
@@ -3355,7 +3379,7 @@ mod global_state_tests {
 
                 // Loop over all blocks and verify that all can be marked as
                 // tip, resulting in a consistent, correct state.
-                for (block, parent) in blocks_and_parents.iter() {
+                for (block, parent) in &blocks_and_parents {
                     alice.set_new_tip(block.clone()).await.unwrap();
                     assert_correct_global_state(&alice, block.clone(), parent.to_owned(), 2, 0)
                         .await;
@@ -3371,7 +3395,7 @@ mod global_state_tests {
             let network = Network::Main;
             let mut rng = rand::rng();
             let genesis_block = Block::genesis(network);
-            let wallet_secret = WalletSecret::devnet_wallet();
+            let wallet_secret = WalletEntropy::devnet_wallet();
             let spending_key = wallet_secret.nth_generation_spending_key(0);
 
             let (block_1a, composer_expected_utxos_1a) =
@@ -3477,7 +3501,7 @@ mod global_state_tests {
         async fn setting_same_tip_twice_is_allowed() {
             let mut rng = rand::rng();
             let network = Network::Main;
-            let wallet_secret = WalletSecret::devnet_wallet();
+            let wallet_secret = WalletEntropy::devnet_wallet();
             let genesis_block = Block::genesis(network);
             let spend_key = wallet_secret.nth_generation_spending_key(0);
 
@@ -3536,7 +3560,6 @@ mod global_state_tests {
         /// test described in [change_exists()]
         #[traced_test]
         #[tokio::test]
-        #[allow(clippy::needless_return)]
         async fn onchain_symmetric_change_exists() {
             change_exists(UtxoNotificationMedium::OnChain, KeyType::Symmetric).await
         }
@@ -3547,7 +3570,6 @@ mod global_state_tests {
         /// test described in [change_exists()]
         #[traced_test]
         #[tokio::test]
-        #[allow(clippy::needless_return)]
         async fn onchain_generation_change_exists() {
             change_exists(UtxoNotificationMedium::OnChain, KeyType::Generation).await
         }
@@ -3558,7 +3580,6 @@ mod global_state_tests {
         /// test described in [change_exists()]
         #[traced_test]
         #[tokio::test]
-        #[allow(clippy::needless_return)]
         async fn offchain_symmetric_change_exists() {
             change_exists(UtxoNotificationMedium::OffChain, KeyType::Symmetric).await
         }
@@ -3569,7 +3590,6 @@ mod global_state_tests {
         /// test described in [change_exists()]
         #[traced_test]
         #[tokio::test]
-        #[allow(clippy::needless_return)]
         async fn offchain_generation_change_exists() {
             change_exists(UtxoNotificationMedium::OffChain, KeyType::Generation).await
         }
@@ -3640,14 +3660,14 @@ mod global_state_tests {
             let mut alice_state_lock = mock_genesis_global_state(
                 network,
                 3,
-                WalletSecret::devnet_wallet(),
+                WalletEntropy::devnet_wallet(),
                 cli_args::Args::default(),
             )
             .await;
             let mut bob_state_lock = mock_genesis_global_state(
                 network,
                 3,
-                WalletSecret::new_pseudorandom(rng.random()),
+                WalletEntropy::new_pseudorandom(rng.random()),
                 cli_args::Args::default(),
             )
             .await;
@@ -3825,7 +3845,7 @@ mod global_state_tests {
                 let mut alice_restored_state_lock = mock_genesis_global_state(
                     network,
                     3,
-                    WalletSecret::devnet_wallet(),
+                    WalletEntropy::devnet_wallet(),
                     cli_args::Args::default(),
                 )
                 .await;

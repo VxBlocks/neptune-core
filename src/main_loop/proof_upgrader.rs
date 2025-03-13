@@ -33,7 +33,7 @@ use crate::models::state::wallet::address::SpendingKey;
 use crate::models::state::wallet::expected_utxo::ExpectedUtxo;
 use crate::models::state::wallet::expected_utxo::UtxoNotifier;
 use crate::models::state::wallet::utxo_notification::UtxoNotifyMethod;
-use crate::models::state::wallet::WalletSecret;
+use crate::models::state::wallet::wallet_entropy::WalletEntropy;
 use crate::models::state::GlobalState;
 use crate::models::state::GlobalStateLock;
 use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulator;
@@ -288,20 +288,21 @@ impl UpgradeJob {
 
             // It's a important to *not* hold any locks when proving happens.
             // Otherwise, entire application freezes!!
-            let (wallet_secret, block_height) = {
+            let (wallet_entropy, block_height) = {
                 let state = global_state_lock.lock_guard().await;
                 (
-                    state.wallet_state.wallet_secret.clone(),
+                    state.wallet_state.wallet_entropy.clone(),
                     state.chain.light_state().header().height,
                 )
             };
 
             // No locks may be held here!
             let (upgraded, expected_utxos) = match upgrade_job
+                .clone()
                 .upgrade(
                     triton_vm_job_queue,
                     job_options,
-                    &wallet_secret,
+                    &wallet_entropy,
                     block_height,
                 )
                 .await
@@ -326,12 +327,10 @@ impl UpgradeJob {
                 }
             };
 
-            let new_update_job: UpdateMutatorSetDataJob = {
+            upgrade_job = {
                 let mut global_state = global_state_lock.lock_guard_mut().await;
                 // Did we receive a new block while proving? If so, perform an
-                // update also, if this was requested (and we have a single proof)
-                // if we only have a ProofCollection, then we throw away the work
-                // regardless.
+                // update also, if this was requested.
 
                 let transaction_is_deprecated = upgraded.kernel.mutator_set_hash
                     != global_state
@@ -375,11 +374,6 @@ impl UpgradeJob {
                     return;
                 }
 
-                let TransactionProof::SingleProof(single_proof) = upgraded.proof else {
-                    info!("Cannot perform update, as we don't have a SingleProof");
-                    return;
-                };
-
                 let Some(ms_update) = global_state
                     .chain
                     .archival_state_mut()
@@ -393,15 +387,38 @@ impl UpgradeJob {
                     return;
                 };
 
-                UpdateMutatorSetDataJob {
-                    old_kernel: upgraded.kernel,
-                    old_single_proof: single_proof,
-                    old_mutator_set: mutator_set_for_tx,
-                    mutator_set_update: ms_update,
+                if let TransactionProof::SingleProof(single_proof) = upgraded.proof {
+                    // Transaction is single-proof supported but MS data is deprecated. Create new
+                    // upgrade job to fix that.
+                    let ms_update_job = UpdateMutatorSetDataJob {
+                        old_kernel: upgraded.kernel,
+                        old_single_proof: single_proof,
+                        old_mutator_set: mutator_set_for_tx,
+                        mutator_set_update: ms_update,
+                    };
+                    UpgradeJob::UpdateMutatorSetData(ms_update_job)
+                } else {
+                    match upgrade_job {
+                        UpgradeJob::PrimitiveWitnessToProofCollection { primitive_witness } => {
+                            // Transaction is proof collection supported but MS data is deprecated.
+                            // Since proof collections cannot be updated, we instead update the
+                            // primitive witness and create a new job to upgrade the updated
+                            // primitive witness to a proof collection.
+                            let new_pw = PrimitiveWitness::update_with_new_ms_data(
+                                primitive_witness,
+                                ms_update,
+                            );
+                            UpgradeJob::PrimitiveWitnessToProofCollection {
+                                primitive_witness: new_pw,
+                            }
+                        }
+                        UpgradeJob::PrimitiveWitnessToSingleProof { .. } => unreachable!(),
+                        UpgradeJob::ProofCollectionToSingleProof { .. } => unreachable!(),
+                        UpgradeJob::Merge { .. } => unreachable!(),
+                        UpgradeJob::UpdateMutatorSetData(_) => unreachable!(),
+                    }
                 }
             };
-
-            upgrade_job = UpgradeJob::UpdateMutatorSetData(new_update_job);
         }
     }
 
@@ -415,7 +432,7 @@ impl UpgradeJob {
         self,
         triton_vm_job_queue: &TritonVmJobQueue,
         proof_job_options: TritonVmProofJobOptions,
-        own_wallet_secret: &WalletSecret,
+        own_wallet_entropy: &WalletEntropy,
         current_block_height: BlockHeight,
     ) -> anyhow::Result<(Transaction, Vec<ExpectedUtxo>)> {
         let gobbling_fee = self.gobbling_fee();
@@ -424,7 +441,7 @@ impl UpgradeJob {
 
         let (gobbler, expected_utxos) = if gobbling_fee.is_positive() {
             info!("Producing gobbler-transaction for a value of {gobbling_fee}");
-            let gobble_receiver = own_wallet_secret.nth_symmetric_key(0);
+            let gobble_receiver = own_wallet_entropy.nth_symmetric_key(0);
             let receiver_preimage = gobble_receiver.privacy_preimage();
             let gobble_receiver = SpendingKey::Symmetric(gobble_receiver);
             let gobble_receiver = gobble_receiver.to_address().expect(
@@ -432,7 +449,7 @@ impl UpgradeJob {
             );
             let gobbler = TransactionDetails::fee_gobbler(
                 gobbling_fee,
-                own_wallet_secret.generate_sender_randomness(
+                own_wallet_entropy.generate_sender_randomness(
                     current_block_height,
                     gobble_receiver.privacy_digest(),
                 ),
@@ -469,7 +486,7 @@ impl UpgradeJob {
         };
 
         let mut rng: StdRng =
-            SeedableRng::from_seed(own_wallet_secret.shuffle_seed(current_block_height.next()));
+            SeedableRng::from_seed(own_wallet_entropy.shuffle_seed(current_block_height.next()));
         let gobble_shuffle_seed: [u8; 32] = rng.random();
 
         match self {
@@ -683,4 +700,211 @@ pub(super) fn get_upgrade_task_from_mempool(
     jobs.sort_by_key(|(job, _)| job.profitability());
 
     jobs.first().cloned()
+}
+
+#[cfg(test)]
+mod test {
+    use tracing_test::traced_test;
+
+    use super::*;
+    use crate::config_models::cli_args;
+    use crate::config_models::network::Network;
+    use crate::models::blockchain::block::Block;
+    use crate::models::state::wallet::address::generation_address::GenerationReceivingAddress;
+    use crate::models::state::wallet::transaction_output::TxOutput;
+    use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
+    use crate::tests::shared::get_test_genesis_setup;
+    use crate::tests::shared::invalid_empty_block_with_timestamp;
+
+    /// Returns a PrimitiveWitness-backed transaction initiated by the global
+    /// state provided as argument. Assumes balance is sufficient to make this
+    /// transaction.
+    async fn primitive_witness_backed_tx(mut state: GlobalStateLock, seed: u64) -> Transaction {
+        let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+        let receiving_address = GenerationReceivingAddress::derive_from_seed(rng.random());
+        let tx_outputs = vec![TxOutput::onchain_native_currency(
+            NativeCurrencyAmount::coins(1),
+            rng.random(),
+            receiving_address.into(),
+            false,
+        )]
+        .into();
+        let mut state = state.lock_guard_mut().await;
+        let change_key = state.wallet_state.next_unused_symmetric_key().await;
+        let fee = NativeCurrencyAmount::from_nau(100);
+        let timestamp = Network::Main.launch_date() + Timestamp::months(7);
+        let (tx, _, _) = state
+            .create_transaction_with_prover_capability(
+                tx_outputs,
+                change_key.into(),
+                UtxoNotificationMedium::OffChain,
+                fee,
+                timestamp,
+                TxProvingCapability::PrimitiveWitness,
+                &TritonVmJobQueue::dummy(),
+            )
+            .await
+            .unwrap();
+
+        tx
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn happy_path() {
+        let network = Network::Main;
+
+        for proving_capability in [
+            TxProvingCapability::ProofCollection,
+            TxProvingCapability::SingleProof,
+        ] {
+            // Alice is premine recipient, so she can make a transaction (after
+            // expiry of timelock).
+            let (main_to_peer_tx, mut main_to_peer_rx, _, _, mut alice, _) =
+                get_test_genesis_setup(network, 2, cli_args::Args::default_with_network(network))
+                    .await
+                    .unwrap();
+            let pwtx = primitive_witness_backed_tx(alice.clone(), 512777439428).await;
+            alice
+                .lock_guard_mut()
+                .await
+                .mempool_insert(pwtx.clone(), TransactionOrigin::Own)
+                .await;
+            let TransactionProof::Witness(pw) = &pwtx.proof else {
+                panic!("Expected PW-backed tx");
+            };
+            let pw_to_tx_upgrade_job =
+                UpgradeJob::from_primitive_witness(proving_capability, pw.to_owned());
+            pw_to_tx_upgrade_job
+                .handle_upgrade(
+                    &TritonVmJobQueue::dummy(),
+                    TransactionOrigin::Own,
+                    true,
+                    alice.clone(),
+                    main_to_peer_tx,
+                )
+                .await;
+
+            let peer_msg = main_to_peer_rx.recv().await.unwrap();
+            let MainToPeerTask::TransactionNotification(tx_notification) = peer_msg else {
+                panic!("Proof upgrader must inform peer tasks about upgraded tx");
+            };
+
+            assert_eq!(
+                pwtx.kernel.txid(),
+                tx_notification.txid,
+                "TXID in peer msg must match that from transaction"
+            );
+
+            // Ensure PC-backed tx exists in mempool
+            let mempool_tx = alice
+                .lock_guard()
+                .await
+                .mempool
+                .get(pwtx.kernel.txid())
+                .unwrap()
+                .to_owned();
+            match proving_capability {
+                TxProvingCapability::LockScript => unreachable!(),
+                TxProvingCapability::PrimitiveWitness => unreachable!(),
+                TxProvingCapability::ProofCollection => assert!(
+                    matches!(mempool_tx.proof, TransactionProof::ProofCollection(_)),
+                    "Tx in mempool must be backed with {proving_capability} after upgrade"
+                ),
+                TxProvingCapability::SingleProof => assert!(
+                    matches!(mempool_tx.proof, TransactionProof::SingleProof(_)),
+                    "Tx in mempool must be backed with {proving_capability} after upgrade"
+                ),
+            }
+
+            assert!(mempool_tx.is_valid().await);
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn race_condition_with_one_new_block() {
+        let network = Network::Main;
+
+        for proving_capability in [
+            TxProvingCapability::ProofCollection,
+            TxProvingCapability::SingleProof,
+        ] {
+            // Alice is premine recipient, so she can make a transaction (after
+            // expiry of timelock).
+            let (main_to_peer_tx, mut main_to_peer_rx, _, _, mut alice, _) =
+                get_test_genesis_setup(network, 2, cli_args::Args::default_with_network(network))
+                    .await
+                    .unwrap();
+            let pwtx = primitive_witness_backed_tx(alice.clone(), 512777439429).await;
+            alice
+                .lock_guard_mut()
+                .await
+                .mempool_insert(pwtx.clone(), TransactionOrigin::Own)
+                .await;
+            let TransactionProof::Witness(pw) = &pwtx.proof else {
+                panic!("Expected PW-backed tx");
+            };
+
+            let upgrade_job = UpgradeJob::from_primitive_witness(proving_capability, pw.to_owned());
+
+            // Before handle upgrade completes, a new block comes in. Making the
+            // method have to do more work.
+            let genesis_block = Block::genesis(network);
+            let block1 = invalid_empty_block_with_timestamp(&genesis_block, pwtx.kernel.timestamp);
+            alice.set_new_tip(block1).await.unwrap();
+            upgrade_job
+                .handle_upgrade(
+                    &TritonVmJobQueue::dummy(),
+                    TransactionOrigin::Own,
+                    true,
+                    alice.clone(),
+                    main_to_peer_tx,
+                )
+                .await;
+
+            let peer_msg = main_to_peer_rx.recv().await.unwrap();
+            let MainToPeerTask::TransactionNotification(tx_notification) = peer_msg else {
+                panic!("Proof upgrader must inform peer tasks about upgraded tx");
+            };
+
+            assert_eq!(
+                pwtx.kernel.txid(),
+                tx_notification.txid,
+                "TXID in peer msg must match that from transaction"
+            );
+
+            // Ensure correct proof-type
+            let mempool_tx = alice
+                .lock_guard()
+                .await
+                .mempool
+                .get(pwtx.kernel.txid())
+                .unwrap()
+                .to_owned();
+            match proving_capability {
+                TxProvingCapability::LockScript => unreachable!(),
+                TxProvingCapability::PrimitiveWitness => unreachable!(),
+                TxProvingCapability::ProofCollection => assert!(
+                    matches!(mempool_tx.proof, TransactionProof::ProofCollection(_)),
+                    "Tx in mempool must be backed with {proving_capability} after upgrade"
+                ),
+                TxProvingCapability::SingleProof => assert!(
+                    matches!(mempool_tx.proof, TransactionProof::SingleProof(_)),
+                    "Tx in mempool must be backed with {proving_capability} after upgrade"
+                ),
+            }
+
+            assert!(mempool_tx.is_valid().await);
+
+            // Ensure tx was updated to latest mutator set
+            let mutator_set_accumulator_after = alice
+                .lock_guard()
+                .await
+                .chain
+                .light_state()
+                .mutator_set_accumulator_after();
+            assert!(mempool_tx.is_confirmable_relative_to(&mutator_set_accumulator_after));
+        }
+    }
 }

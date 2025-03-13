@@ -82,7 +82,7 @@ impl TypeScriptAndWitness {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "arbitrary-impls"))]
     pub(crate) fn new_with_tokens(program: Program, tokens: Vec<BFieldElement>) -> Self {
         Self {
             program,
@@ -95,7 +95,7 @@ impl TypeScriptAndWitness {
     pub(crate) fn nondeterminism(&self) -> NonDeterminism {
         NonDeterminism::new(self.nd_tokens.clone())
             .with_digests(self.nd_digests.clone())
-            .with_ram(self.nd_memory.iter().cloned().collect::<HashMap<_, _>>())
+            .with_ram(self.nd_memory.iter().copied().collect::<HashMap<_, _>>())
     }
 
     /// Assuming the type script halts gracefully, prove it.
@@ -143,6 +143,10 @@ impl std::hash::Hash for TypeScriptAndWitness {
 
 #[cfg(test)]
 pub(crate) mod test {
+    use rand::rngs::StdRng;
+    use rand::Rng;
+    use rand::SeedableRng;
+
     use super::*;
 
     impl TypeScriptAndWitness {
@@ -159,6 +163,28 @@ pub(crate) mod test {
             let public_input = PublicInput::new(standard_input);
 
             VM::run(self.program.clone(), public_input, self.nondeterminism()).is_ok()
+        }
+
+        /// Scramble witness data without affecting program. For negative
+        /// tests.
+        pub(crate) fn scramble_non_determinism(&mut self, seed: u64) {
+            let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+
+            if !self.nd_tokens.is_empty() {
+                let idx = rng.random_range(0..self.nd_tokens.len());
+                self.nd_tokens[idx] = rng.random();
+            }
+
+            if !self.nd_memory.is_empty() {
+                let idx = rng.random_range(0..self.nd_memory.len());
+                let (address, _value) = self.nd_memory[idx];
+                self.nd_memory[idx] = (address, rng.random());
+            }
+
+            if !self.nd_digests.is_empty() {
+                let idx = rng.random_range(0..self.nd_digests.len());
+                self.nd_digests[idx] = rng.random();
+            }
         }
     }
 }

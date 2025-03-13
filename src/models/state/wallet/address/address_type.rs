@@ -33,7 +33,7 @@ use crate::BFieldElement;
 /// Enumerates available cryptographic key implementations for sending funds.
 ///
 /// In most (but not all) cases there is a matching address.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum KeyType {
     /// To unlock, prove knowledge of the preimage.
@@ -152,10 +152,11 @@ impl TryFrom<ReceivingAddress> for generation_address::GenerationReceivingAddres
     type Error = anyhow::Error;
 
     fn try_from(a: ReceivingAddress) -> Result<Self> {
-        match a {
-            ReceivingAddress::Generation(a) => Ok(*a),
-            _ => bail!("not a generation address"),
-        }
+        let ReceivingAddress::Generation(a) = a else {
+            bail!("not a generation address");
+        };
+
+        Ok(*a)
     }
 }
 
@@ -170,7 +171,7 @@ impl ReceivingAddress {
 
     /// generates a [PublicAnnouncement] for an output Utxo
     ///
-    /// The public announcement contains a Vec<BFieldElement> with fields:
+    /// The public announcement contains a [`Vec<BFieldElement>`] with fields:
     ///   0    --> type flag.  (flag of key type)
     ///   1    --> receiver_identifier  (fingerprint derived from seed)
     ///   2..n --> ciphertext (encrypted utxo + sender_randomness)
@@ -270,7 +271,7 @@ impl ReceivingAddress {
     ///   12 end of address.
     /// ```
     pub fn to_bech32m_abbreviated(&self, network: Network) -> Result<String> {
-        self.bech32m_abbreviate(self.to_bech32m(network)?, network)
+        Ok(self.bech32m_abbreviate(self.to_bech32m(network)?, network))
     }
 
     /// returns a bech32m string suitable for display purposes.
@@ -305,10 +306,10 @@ impl ReceivingAddress {
     ///   12 end of address.
     /// ```
     pub fn to_display_bech32m_abbreviated(&self, network: Network) -> Result<String> {
-        self.bech32m_abbreviate(self.to_display_bech32m(network)?, network)
+        Ok(self.bech32m_abbreviate(self.to_display_bech32m(network)?, network))
     }
 
-    fn bech32m_abbreviate(&self, bech32m: String, network: Network) -> Result<String> {
+    fn bech32m_abbreviate(&self, bech32m: String, network: Network) -> String {
         let first_len = self.get_hrp(network).len() + 12usize;
         let last_len = 12usize;
 
@@ -317,7 +318,7 @@ impl ReceivingAddress {
         let (first, _) = bech32m.split_at(first_len);
         let (_, last) = bech32m.split_at(bech32m.len() - last_len);
 
-        Ok(format!("{}...{}", first, last))
+        format!("{first}...{last}")
     }
 
     /// parses an address from its bech32m encoding
@@ -523,7 +524,7 @@ impl SpendingKey {
             // ... which can be decrypted with this key
             .filter_map(|c| self.ok_warn(self.decrypt(&c).expect("non-hash-lock key should have decryption option")))
 
-            // ... map to AnnouncedUtxo
+            // ... map to IncomingUtxo
             .map(move |(utxo, sender_randomness)| {
                 // and join those with the receiver digest to get a commitment
                 // Note: the commitment is computed in the same way as in the mutator set.

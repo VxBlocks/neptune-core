@@ -105,8 +105,8 @@ use crate::models::state::wallet::address::generation_address::GenerationReceivi
 use crate::models::state::wallet::expected_utxo::ExpectedUtxo;
 use crate::models::state::wallet::expected_utxo::UtxoNotifier;
 use crate::models::state::wallet::transaction_output::TxOutputList;
+use crate::models::state::wallet::wallet_entropy::WalletEntropy;
 use crate::models::state::wallet::wallet_state::WalletState;
-use crate::models::state::wallet::WalletSecret;
 use crate::models::state::GlobalStateLock;
 use crate::prelude::twenty_first;
 use crate::util_types::mutator_set::addition_record::AdditionRecord;
@@ -123,7 +123,6 @@ pub fn get_peer_map() -> HashMap<SocketAddr, PeerInfo> {
 
 // Return empty database objects, and root directory for this unit test instantiation's
 /// data directory.
-#[allow(clippy::type_complexity)]
 pub async fn unit_test_databases(
     network: Network,
 ) -> Result<(
@@ -143,8 +142,20 @@ pub fn get_dummy_socket_address(count: u8) -> SocketAddr {
     std::net::SocketAddr::from_str(&format!("127.0.0.{}:8080", count)).unwrap()
 }
 
+/// Get a dummy-peer representing an incoming connection.
+pub(crate) fn get_dummy_peer_incoming(address: SocketAddr) -> PeerInfo {
+    let peer_connection_info = PeerConnectionInfo::new(Some(8080), address, true);
+    let peer_handshake = get_dummy_handshake_data_for_genesis(Network::Main);
+    PeerInfo::new(
+        peer_connection_info,
+        &peer_handshake,
+        SystemTime::now(),
+        cli_args::Args::default().peer_tolerance,
+    )
+}
+
 /// Get a dummy-peer representing an outgoing connection.
-pub(crate) fn get_dummy_peer(address: SocketAddr) -> PeerInfo {
+pub(crate) fn get_dummy_peer_outgoing(address: SocketAddr) -> PeerInfo {
     let peer_connection_info = PeerConnectionInfo::new(Some(8080), address, false);
     let peer_handshake = get_dummy_handshake_data_for_genesis(Network::Main);
     PeerInfo::new(
@@ -199,7 +210,7 @@ pub(crate) async fn mock_genesis_global_state(
     // TODO: Remove network and read it from CLI arguments instead
     network: Network,
     peer_count: u8,
-    wallet: WalletSecret,
+    wallet: WalletEntropy,
     cli: cli_args::Args,
 ) -> GlobalStateLock {
     let (archival_state, peer_db, _data_dir) = mock_genesis_archival_state(network).await;
@@ -208,7 +219,7 @@ pub(crate) async fn mock_genesis_global_state(
     for i in 0..peer_count {
         let peer_address =
             std::net::SocketAddr::from_str(&format!("123.123.123.{}:8080", i)).unwrap();
-        peer_map.insert(peer_address, get_dummy_peer(peer_address));
+        peer_map.insert(peer_address, get_dummy_peer_outgoing(peer_address));
     }
     let networking_state = NetworkingState::new(peer_map, peer_db);
     let genesis_block = archival_state.get_tip().await;
@@ -246,7 +257,6 @@ pub(crate) async fn mock_genesis_global_state(
 ///
 /// Returns:
 /// (peer_broadcast_channel, from_main_receiver, to_main_transmitter, to_main_receiver, global state, peer's handshake data)
-#[allow(clippy::type_complexity)]
 pub(crate) async fn get_test_genesis_setup(
     network: Network,
     peer_count: u8,
@@ -259,18 +269,17 @@ pub(crate) async fn get_test_genesis_setup(
     GlobalStateLock,
     HandshakeData,
 )> {
-    let (peer_broadcast_tx, mut _from_main_rx1) =
+    let (peer_broadcast_tx, from_main_rx) =
         broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
-    let (to_main_tx, mut _to_main_rx1) = mpsc::channel::<PeerTaskToMain>(PEER_CHANNEL_CAPACITY);
-    let from_main_rx_clone = peer_broadcast_tx.subscribe();
+    let (to_main_tx, to_main_rx) = mpsc::channel::<PeerTaskToMain>(PEER_CHANNEL_CAPACITY);
 
-    let devnet_wallet = WalletSecret::devnet_wallet();
+    let devnet_wallet = WalletEntropy::devnet_wallet();
     let state = mock_genesis_global_state(network, peer_count, devnet_wallet, cli).await;
     Ok((
         peer_broadcast_tx,
-        from_main_rx_clone,
+        from_main_rx,
         to_main_tx,
-        _to_main_rx1,
+        to_main_rx,
         state,
         get_dummy_handshake_data_for_genesis(network),
     ))
@@ -311,10 +320,6 @@ pub(crate) fn unit_test_data_directory(network: Network) -> Result<DataDirectory
 // However, Box<...> is used here because Pin<T> does not allow a &mut T,
 // So a Box<T> (which also implements DerefMut) allows a pinned, mutable
 // pointer.
-//
-// We suppress `clippy::box-collection` on a type alias because the can't
-// easily place the pragma inside the `pin_project!` macro.
-#[allow(clippy::box_collection)]
 type ActionList<Item> = Box<Vec<Action<Item>>>;
 
 pin_project! {
@@ -325,7 +330,7 @@ pub struct Mock<Item> {
 }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MockError {
     WrongSend,
     UnexpectedSend,
@@ -515,13 +520,12 @@ pub fn make_mock_transaction(
     make_mock_transaction_with_mutator_set_hash(inputs, outputs, Digest::default())
 }
 
-pub(crate) fn make_mock_transaction_with_mutator_set_hash(
+pub(crate) fn make_mock_transaction_with_mutator_set_hash_and_timestamp(
     inputs: Vec<RemovalRecord>,
     outputs: Vec<AdditionRecord>,
     mutator_set_hash: Digest,
+    timestamp: Timestamp,
 ) -> Transaction {
-    let timestamp = Timestamp::now();
-
     Transaction {
         kernel: TransactionKernelProxy {
             inputs,
@@ -536,6 +540,21 @@ pub(crate) fn make_mock_transaction_with_mutator_set_hash(
         .into_kernel(),
         proof: TransactionProof::invalid(),
     }
+}
+
+pub(crate) fn make_mock_transaction_with_mutator_set_hash(
+    inputs: Vec<RemovalRecord>,
+    outputs: Vec<AdditionRecord>,
+    mutator_set_hash: Digest,
+) -> Transaction {
+    let timestamp = Timestamp::now();
+
+    make_mock_transaction_with_mutator_set_hash_and_timestamp(
+        inputs,
+        outputs,
+        mutator_set_hash,
+        timestamp,
+    )
 }
 
 pub(crate) fn dummy_expected_utxo() -> ExpectedUtxo {
@@ -748,7 +767,7 @@ pub(crate) async fn make_mock_block(
 /// Return a dummy-wallet used for testing. The returned wallet is populated with
 /// whatever UTXOs are present in the genesis block.
 pub async fn mock_genesis_wallet_state(
-    wallet_secret: WalletSecret,
+    wallet_secret: WalletEntropy,
     network: Network,
 ) -> WalletState {
     let data_dir = unit_test_data_directory(network).unwrap();
@@ -756,7 +775,7 @@ pub async fn mock_genesis_wallet_state(
 }
 
 pub async fn mock_genesis_wallet_state_with_data_dir(
-    wallet_secret: WalletSecret,
+    wallet_entropy: WalletEntropy,
     network: Network,
     data_dir: &DataDirectory,
 ) -> WalletState {
@@ -765,7 +784,7 @@ pub async fn mock_genesis_wallet_state_with_data_dir(
         network,
         ..Default::default()
     };
-    WalletState::new_from_wallet_secret(data_dir, wallet_secret, &cli_args).await
+    WalletState::new_from_wallet_entropy(data_dir, wallet_entropy, &cli_args).await
 }
 
 /// Return an archival state populated with the genesis block
@@ -823,7 +842,7 @@ pub(crate) async fn mine_block_to_wallet_invalid_block_proof(
         .lock_guard()
         .await
         .wallet_state
-        .wallet_secret
+        .wallet_entropy
         .guesser_preimage(prev_block_digest);
     let mut block = Block::block_template_invalid_proof(&tip_block, transaction, timestamp, None);
     block.set_header_guesser_digest(guesser_preimage.hash());
@@ -845,6 +864,19 @@ pub(crate) fn invalid_empty_block(predecessor: &Block) -> Block {
     Block::block_template_invalid_proof(predecessor, tx, timestamp, None)
 }
 
+pub(crate) fn invalid_empty_block_with_timestamp(
+    predecessor: &Block,
+    timestamp: Timestamp,
+) -> Block {
+    let tx = make_mock_transaction_with_mutator_set_hash_and_timestamp(
+        vec![],
+        vec![],
+        predecessor.mutator_set_accumulator_after().hash(),
+        timestamp,
+    );
+    Block::block_template_invalid_proof(predecessor, tx, timestamp, None)
+}
+
 /// Create a fake block proposal; will pass `is_valid` but fail pow-check. Will
 /// be a valid block except for proof and PoW.
 pub(crate) async fn fake_valid_block_proposal_from_tx(
@@ -858,9 +890,7 @@ pub(crate) async fn fake_valid_block_proposal_from_tx(
     let body = primitive_witness.body().to_owned();
     let header = primitive_witness.header(timestamp, None);
     let (appendix, proof) = {
-        let block_proof_witness = BlockProofWitness::produce(primitive_witness)
-            .await
-            .expect("producing block proof witness from block primitive witness should succeed");
+        let block_proof_witness = BlockProofWitness::produce(primitive_witness);
         let appendix = block_proof_witness.appendix();
         let claim = BlockProgram::claim(&body, &appendix);
         cache_true_claim(claim).await;
@@ -957,7 +987,7 @@ pub(crate) async fn fake_create_block_transaction_for_tests(
     }
 
     let mut rng = StdRng::from_seed(shuffle_seed);
-    for tx_to_include in selected_mempool_txs.into_iter() {
+    for tx_to_include in selected_mempool_txs {
         block_transaction =
             fake_merge_transactions_for_tests(block_transaction, tx_to_include, rng.random())
                 .await
@@ -1080,7 +1110,7 @@ pub(crate) async fn wallet_state_has_all_valid_mps(
     tip_block: &Block,
 ) -> bool {
     let monitored_utxos = wallet_state.wallet_db.monitored_utxos();
-    for monitored_utxo in monitored_utxos.get_all().await.iter() {
+    for monitored_utxo in &monitored_utxos.get_all().await {
         let current_mp = monitored_utxo.get_membership_proof_for_block(tip_block.hash());
 
         match current_mp {

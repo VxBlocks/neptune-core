@@ -27,9 +27,9 @@ impl BasicSnippet for CoinbaseAmount {
     fn code(&self, library: &mut Library) -> Vec<LabelledInstruction> {
         let entrypoint = self.entrypoint();
 
-        // `Coinbase` has type `Option<NeptuneCoin>` where the discriminant
-        // from `Option` is one word, and `NeptuneCoin` is four words, as it is
-        // represented by a u128.
+        // `Coinbase` has type `Option<NativeCurrencyAmount>` where the
+        // discriminant from `Option` is one word, and `NativeCurrencyAmount` is
+        // four words, as it is represented by a u128.
         let size_minus_one = NativeCurrencyAmount::static_length().unwrap();
 
         let push_max_amount = NativeCurrencyAmount::max().push_to_stack();
@@ -163,6 +163,8 @@ mod test {
             stack: &mut Vec<BFieldElement>,
             memory: &mut std::collections::HashMap<BFieldElement, BFieldElement>,
         ) {
+            type CoinbaseAmount = Option<NativeCurrencyAmount>;
+
             let coinbase_ptr = stack.pop().unwrap();
 
             let size = match memory[&coinbase_ptr].value() {
@@ -180,7 +182,6 @@ mod test {
                 );
             }
 
-            type CoinbaseAmount = Option<NativeCurrencyAmount>;
             let coinbase = *CoinbaseAmount::decode(&coinbase_encoded).unwrap();
 
             let coinbase_amount = coinbase.unwrap_or_else(NativeCurrencyAmount::zero);

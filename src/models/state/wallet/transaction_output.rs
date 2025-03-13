@@ -319,7 +319,7 @@ impl TxOutputList {
     /// Returns all public announcement for this TxOutputList
     pub(crate) fn public_announcements(&self) -> Vec<PublicAnnouncement> {
         let mut public_announcements = vec![];
-        for tx_output in self.0.iter() {
+        for tx_output in &self.0 {
             if let Some(pa) = tx_output.public_announcement() {
                 public_announcements.push(pa);
             }
@@ -330,7 +330,7 @@ impl TxOutputList {
 
     pub(crate) fn private_notifications(&self, network: Network) -> Vec<PrivateNotificationData> {
         let mut private_utxo_notifications = vec![];
-        for tx_output in self.0.iter() {
+        for tx_output in &self.0 {
             if let Some((ciphertext, receiver_address)) = tx_output.private_notification(network) {
                 let notification_data = PrivateNotificationData {
                     cleartext: tx_output.notification_payload(),
@@ -374,7 +374,7 @@ mod tests {
     use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::state::wallet::address::generation_address::GenerationReceivingAddress;
     use crate::models::state::wallet::address::KeyType;
-    use crate::models::state::wallet::WalletSecret;
+    use crate::models::state::wallet::wallet_entropy::WalletEntropy;
     use crate::tests::shared::mock_genesis_global_state;
 
     impl TxOutput {
@@ -404,7 +404,7 @@ mod tests {
         let global_state_lock = mock_genesis_global_state(
             Network::RegTest,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
@@ -422,7 +422,7 @@ mod tests {
 
         let sender_randomness = state
             .wallet_state
-            .wallet_secret
+            .wallet_entropy
             .generate_sender_randomness(block_height, address.privacy_digest());
 
         for owned_utxo_notification_medium in [
@@ -453,7 +453,7 @@ mod tests {
         let mut global_state_lock = mock_genesis_global_state(
             Network::RegTest,
             2,
-            WalletSecret::devnet_wallet(),
+            WalletEntropy::devnet_wallet(),
             cli_args::Args::default(),
         )
         .await;
@@ -490,7 +490,7 @@ mod tests {
             let utxo = Utxo::new_native_currency(address.lock_script(), amount);
             let sender_randomness = state
                 .wallet_state
-                .wallet_secret
+                .wallet_entropy
                 .generate_sender_randomness(block_height, address.privacy_digest());
 
             let tx_output = TxOutput::auto(

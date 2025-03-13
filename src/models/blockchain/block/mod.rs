@@ -61,7 +61,7 @@ use crate::models::proof_abstractions::verifier::verify;
 use crate::models::proof_abstractions::SecretWitness;
 use crate::models::state::wallet::address::hash_lock_key::HashLockKey;
 use crate::models::state::wallet::address::ReceivingAddress;
-use crate::models::state::wallet::WalletSecret;
+use crate::models::state::wallet::wallet_entropy::WalletEntropy;
 use crate::prelude::twenty_first;
 use crate::util_types::mutator_set::addition_record::AdditionRecord;
 use crate::util_types::mutator_set::commit;
@@ -145,9 +145,8 @@ pub enum BlockProof {
 // exist no impls for `OnceLock<_>` so derive fails.
 //
 // A unit test-suite exists in module tests::digest_encapsulation.
-#[allow(non_local_definitions)] // needed for [Deserialize] macro from serde
-#[derive(Clone, Debug, Serialize, Deserialize, BFieldCodec, GetSize)]
 #[readonly::make]
+#[derive(Debug, Clone, Serialize, Deserialize, BFieldCodec, GetSize)]
 pub struct Block {
     /// Everything but the proof
     pub kernel: BlockKernel,
@@ -218,7 +217,7 @@ impl Block {
         let body = primitive_witness.body().to_owned();
         let header = primitive_witness.header(timestamp, target_block_interval);
         let (appendix, proof) = {
-            let block_proof_witness = BlockProofWitness::produce(primitive_witness).await?;
+            let block_proof_witness = BlockProofWitness::produce(primitive_witness);
             let appendix = block_proof_witness.appendix();
             let claim = BlockProgram::claim(&body, &appendix);
             let proof = BlockProgram
@@ -306,7 +305,7 @@ impl Block {
         self.digest = Default::default();
     }
 
-    /// sets header header nonce.
+    /// sets header nonce.
     ///
     /// note: this causes block digest to change.
     #[inline]
@@ -473,7 +472,7 @@ impl Block {
 
     fn premine_distribution() -> Vec<(ReceivingAddress, NativeCurrencyAmount)> {
         // The premine UTXOs can be hardcoded here.
-        let authority_wallet = WalletSecret::devnet_wallet();
+        let authority_wallet = WalletEntropy::devnet_wallet();
         let authority_receiving_address = authority_wallet
             .nth_generation_spending_key(0)
             .to_address()
@@ -707,6 +706,8 @@ impl Block {
         target_block_interval: Option<Timestamp>,
         minimum_block_time: Option<Timestamp>,
     ) -> Result<(), BlockValidationError> {
+        const FUTUREDATING_LIMIT: Timestamp = Timestamp::minutes(5);
+
         // Note that there is a correspondence between the logic here and the
         // error types in `BlockValidationError`.
 
@@ -755,7 +756,6 @@ impl Block {
         }
 
         // 0.g)
-        const FUTUREDATING_LIMIT: Timestamp = Timestamp::minutes(5);
         let future_limit = now + FUTUREDATING_LIMIT;
         if self.kernel.header.timestamp >= future_limit {
             return Err(BlockValidationError::FutureDating);
@@ -789,7 +789,7 @@ impl Block {
         }
 
         // 2.a)
-        for removal_record in self.kernel.body.transaction_kernel.inputs.iter() {
+        for removal_record in &self.kernel.body.transaction_kernel.inputs {
             if !previous_block
                 .mutator_set_accumulator_after()
                 .can_remove(removal_record)
@@ -858,7 +858,7 @@ impl Block {
         Ok(())
     }
 
-    /// Determine whether the the proof-of-work puzzle was solved correctly.
+    /// Determine whether the proof-of-work puzzle was solved correctly.
     ///
     /// Specifically, compare the hash of the current block against the
     /// target corresponding to the previous block;s difficulty and return true
@@ -903,13 +903,15 @@ impl Block {
     /// accumulated proof-of-work.
     ///
     /// This function is called exclusively in
-    /// [`GlobalState::incoming_block_is_more_canonical`], which is in turn
+    /// [`GlobalState::incoming_block_is_more_canonical`][1], which is in turn
     /// called in two places:
     ///  1. In `peer_loop`, when a peer sends a block. The `peer_loop` task only
     ///     sends the incoming block to the `main_loop` if it is more canonical.
     ///  2. In `main_loop`, when it receives a block from a `peer_loop` or from
     ///     the `mine_loop`. It is possible that despite (1), race conditions
-    ///     arise and they must be solved here.
+    ///     arise, and they must be solved here.
+    ///
+    /// [1]: crate::models::state::GlobalState::incoming_block_is_more_canonical
     pub(crate) fn fork_choice_rule<'a>(
         current_tip: &'a Self,
         incoming_block: &'a Self,
@@ -950,6 +952,8 @@ impl Block {
     ///
     /// The genesis block does not have a guesser reward.
     pub(crate) fn guesser_fee_utxos(&self) -> Vec<Utxo> {
+        const MINER_REWARD_TIME_LOCK_PERIOD: Timestamp = Timestamp::years(3);
+
         if self.header().height.is_genesis() {
             return vec![];
         }
@@ -962,7 +966,6 @@ impl Block {
         value_locked.div_two();
         let value_unlocked = total_guesser_reward.checked_sub(&value_locked).unwrap();
 
-        const MINER_REWARD_TIME_LOCK_PERIOD: Timestamp = Timestamp::years(3);
         let coins = vec![
             Coin::new_native_currency(value_locked),
             TimeLock::until(self.header().timestamp + MINER_REWARD_TIME_LOCK_PERIOD),
@@ -1029,7 +1032,7 @@ pub(crate) mod block_tests {
     use crate::models::state::tx_proving_capability::TxProvingCapability;
     use crate::models::state::wallet::transaction_output::TxOutput;
     use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
-    use crate::models::state::wallet::WalletSecret;
+    use crate::models::state::wallet::wallet_entropy::WalletEntropy;
     use crate::tests::shared::fake_valid_successor_for_tests;
     use crate::tests::shared::invalid_block_with_transaction;
     use crate::tests::shared::make_mock_block;
@@ -1091,7 +1094,7 @@ pub(crate) mod block_tests {
     async fn test_difficulty_control_matches() {
         let network = Network::Main;
 
-        let a_wallet_secret = WalletSecret::new_random();
+        let a_wallet_secret = WalletEntropy::new_random();
         let a_key = a_wallet_secret.nth_generation_spending_key_for_tests(0);
 
         // TODO: Can this outer-loop be parallelized?
@@ -1198,7 +1201,7 @@ pub(crate) mod block_tests {
         let mut mmra = MmrAccumulator::new_from_leafs(vec![genesis_block.hash()]);
 
         for i in 0..55 {
-            let wallet_secret = WalletSecret::new_random();
+            let wallet_secret = WalletEntropy::new_random();
             let key = wallet_secret.nth_generation_spending_key_for_tests(0);
             let (new_block, _) =
                 make_mock_block(blocks.last().unwrap(), None, key, rng.random()).await;
@@ -1289,7 +1292,7 @@ pub(crate) mod block_tests {
                 fake_valid_successor_for_tests(&genesis_block, plus_seven_months, rng.random())
                     .await;
 
-            let alice_wallet = WalletSecret::devnet_wallet();
+            let alice_wallet = WalletEntropy::devnet_wallet();
             let mut alice = mock_genesis_global_state(
                 network,
                 3,
@@ -1658,7 +1661,7 @@ pub(crate) mod block_tests {
             let launch_date = genesis_block.header().timestamp;
             let in_seven_months = launch_date + Timestamp::months(7);
             let in_eight_months = launch_date + Timestamp::months(8);
-            let alice_wallet = WalletSecret::devnet_wallet();
+            let alice_wallet = WalletEntropy::devnet_wallet();
             let alice_key = alice_wallet.nth_generation_spending_key(0);
             let alice_address = alice_key.to_address();
             let mut alice =
@@ -1723,6 +1726,7 @@ pub(crate) mod block_tests {
                 .apply_to_accumulator_and_records(
                     &mut ms,
                     &mut mutator_set_update_tx.removals.iter_mut().collect_vec(),
+                    &mut [],
                 )
                 .expect(reason);
             mutator_set_update_tx

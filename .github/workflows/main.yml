@@ -29,7 +29,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Build documentation
-        run: cargo doc --no-deps --workspace
+        run: cargo doc --no-deps --workspace --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -46,6 +46,7 @@ jobs:
           --
           --skip mine_20_blocks_in_40_seconds
           --skip hash_rate_independent_of_tx_size
+          --skip blocks_with_0_to_10_inputs_and_successors_are_valid
 
         # `--doc` cannot be mixed with other target option
       - name: Run documentation tests

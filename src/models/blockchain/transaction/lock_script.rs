@@ -99,6 +99,11 @@ impl LockScriptAndWitness {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_nd_tokens(&mut self, tokens: Vec<BFieldElement>) {
+        self.nd_tokens = tokens;
+    }
+
     pub fn new(program: Program) -> Self {
         Self {
             program,
@@ -120,7 +125,7 @@ impl LockScriptAndWitness {
     pub fn nondeterminism(&self) -> NonDeterminism {
         NonDeterminism::new(self.nd_tokens.clone())
             .with_digests(self.nd_digests.clone())
-            .with_ram(self.nd_memory.iter().cloned().collect::<HashMap<_, _>>())
+            .with_ram(self.nd_memory.iter().copied().collect::<HashMap<_, _>>())
     }
 
     /// Determine if the given UTXO can be unlocked with this

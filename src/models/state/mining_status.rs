@@ -42,10 +42,12 @@ impl ComposingWorkInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
 pub enum MiningStatus {
     Guessing(GuessingWorkInfo),
     Composing(ComposingWorkInfo),
+
+    #[default]
     Inactive,
 }
 

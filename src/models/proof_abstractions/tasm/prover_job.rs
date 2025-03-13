@@ -41,7 +41,7 @@ pub enum ProverJobError {
 
 /// represents an error invoking external prover process
 ///
-/// provides additional details for [JobError::TritonVmProverFailed]
+/// provides additional details for [ProverJobError::TritonVmProverFailed]
 #[derive(Debug, thiserror::Error)]
 pub enum VmProcessError {
     #[error("parameter serialization failed")]
@@ -236,13 +236,14 @@ impl ProverJob {
     ///
     /// If we are in a test environment, try reading it from disk. If it is not
     /// there, generate it and store it to disk.
+    #[cfg_attr(test, expect(clippy::unused_async))]
     async fn prove(&self, rx: JobCancelReceiver) -> JobCompletion {
         // todo: make test version async, cancellable.
         #[cfg(test)]
         {
             // avoid some 'unused' compiler warnings.
             let _dummy = rx;
-            let _cancelled = ProverProcessCompletion::Cancelled;
+            _ = ProverProcessCompletion::Cancelled;
 
             let proof = test::load_proof_or_produce_and_save(
                 &self.claim,

@@ -16,7 +16,7 @@ use tasm_lib::twenty_first::xfe;
 use zeroize::Zeroize;
 
 /// Holds the secret seed of a wallet.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretKeyMaterial(pub(crate) XFieldElement);
 
 impl Zeroize for SecretKeyMaterial {
@@ -162,11 +162,62 @@ impl SecretKeyMaterial {
         );
         Ok(Self(xfe))
     }
+
+    /// Convert the secret key material into a BIP-39 phrase consisting of 18
+    /// words (for 192 bits of entropy).
+    pub fn to_phrase(&self) -> Vec<String> {
+        let entropy = self
+            .0
+            .coefficients
+            .iter()
+            .flat_map(|bfe| bfe.value().to_le_bytes())
+            .collect_vec();
+        assert_eq!(
+            entropy.len(),
+            24,
+            "Entropy for secret seed does not consist of 24 bytes."
+        );
+        let mnemonic = Mnemonic::from_entropy(&entropy, bip39::Language::English)
+            .expect("Wrong entropy length (should be 24 bytes).");
+        mnemonic
+            .phrase()
+            .split(' ')
+            .map(|s| s.to_string())
+            .collect_vec()
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    mod phrase_conversion {
+        use rand::rng;
+
+        use super::*;
+
+        #[test]
+        fn phrase_conversion_works() {
+            let wallet_secret = SecretKeyMaterial(rng().random());
+            let phrase = wallet_secret.to_phrase();
+            let wallet_again = SecretKeyMaterial::from_phrase(&phrase).unwrap();
+            let phrase_again = wallet_again.to_phrase();
+
+            assert_eq!(wallet_secret, wallet_again);
+            assert_eq!(phrase, phrase_again);
+        }
+
+        #[test]
+        fn bad_phrase_conversion_fails() {
+            let wallet_secret = SecretKeyMaterial(rng().random());
+            let mut phrase = wallet_secret.to_phrase();
+            phrase.push("blank".to_string());
+            assert!(SecretKeyMaterial::from_phrase(&phrase).is_err());
+            assert!(SecretKeyMaterial::from_phrase(&phrase[0..phrase.len() - 2]).is_err());
+            phrase[0] = "bbb".to_string();
+            assert!(SecretKeyMaterial::from_phrase(&phrase[0..phrase.len() - 1]).is_err());
+        }
+    }
 
     mod shamir {
         use proptest::prelude::Just;
@@ -315,8 +366,7 @@ mod test {
             let mut selected_shares = (0..t - 1)
                 .map(|_| shares.swap_remove(rng.random_range(0..shares.len())))
                 .collect_vec();
-            let duplicate_share =
-                selected_shares[rng.random_range(0..selected_shares.len())].clone();
+            let duplicate_share = selected_shares[rng.random_range(0..selected_shares.len())];
             selected_shares.push(duplicate_share);
             println!("selected shares: {:?}", selected_shares);
             prop_assert_eq!(
@@ -343,18 +393,16 @@ mod test {
 
             // Make a random selection of t+1 shares such that both sharings are
             // represented. There can be no duplicate indices so n > t.
-            let mut selected_shares = vec![];
-            let insert_unique_index =
-                |collection: &mut Vec<_>, share: (usize, SecretKeyMaterial)| {
-                    if !collection.iter().any(|(i, _)| *i == share.0) {
-                        collection.push(share);
-                        false
-                    } else {
-                        true
-                    }
-                };
+            let insert_unique_index = |collection: &mut Vec<_>, share: (_, _)| {
+                let is_share_in_collection = collection.iter().any(|(i, _)| *i == share.0);
+                if !is_share_in_collection {
+                    collection.push(share);
+                }
+                is_share_in_collection
+            };
 
             // add one share a, randomly selected
+            let mut selected_shares = vec![];
             insert_unique_index(
                 &mut selected_shares,
                 shares_a.swap_remove(rng.random_range(0..shares_a.len())),
