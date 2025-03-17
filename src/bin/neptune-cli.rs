@@ -234,6 +234,12 @@ enum Command {
     /// retrieve size of mempool in bytes (in RAM)
     MempoolSize,
 
+    /// retrieve overview of mempool
+    MempoolOverview{
+        start_index: usize,
+        number: usize,
+    },
+
     /******** BLOCKCHAIN STATISTICS ********/
     /// Show block intervals in milliseconds, in reverse chronological order.
     BlockIntervals {
@@ -893,6 +899,10 @@ async fn main() -> Result<()> {
         Command::MempoolSize => {
             let size_in_bytes: usize = client.mempool_size(ctx, token).await??;
             println!("{} bytes", size_in_bytes);
+        }
+        Command::MempoolOverview { start_index, number } => {
+            let messages = client.mempool_overview(context::current(), token, start_index, number).await??;
+            println!("{:?}", serde_json::to_string(&messages).unwrap());
         }
 
         /******** BLOCKCHAIN STATISTICS ********/
