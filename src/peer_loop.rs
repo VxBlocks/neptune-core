@@ -1654,12 +1654,13 @@ impl PeerLoopHandler {
                 }
                 Ok(KEEP_CONNECTION_ALIVE)
             }
-            MainToPeerTask::TransactionNotification(transaction_notification) => {
-                debug!("Sending PeerMessage::TransactionNotification");
-                peer.send(PeerMessage::TransactionNotification(
-                    transaction_notification,
-                ))
-                .await?;
+            MainToPeerTask::TransactionNotification(_transaction_notification) => {
+                info!("****** Sending PeerMessage::TransactionNotification todo");
+                // todo:
+                // peer.send(PeerMessage::TransactionNotification(
+                //     transaction_notification,
+                // ))
+                // .await?;
                 debug!("Sent PeerMessage::TransactionNotification");
                 Ok(KEEP_CONNECTION_ALIVE)
             }
