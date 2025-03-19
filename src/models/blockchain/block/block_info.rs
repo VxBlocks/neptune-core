@@ -4,14 +4,17 @@
 use itertools::Itertools;
 use serde::Deserialize;
 use serde::Serialize;
+use tasm_lib::prelude::Tip5;
 use twenty_first::math::digest::Digest;
 
+use super::block_kernel::BlockKernel;
 use super::difficulty_control::Difficulty;
 use super::difficulty_control::ProofOfWork;
 use crate::models::blockchain::block::block_height::BlockHeight;
 use crate::models::blockchain::block::Block;
 use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
 use crate::models::proof_abstractions::timestamp::Timestamp;
+use crate::models::state::transaction_kernel_id::TransactionKernelId;
 use crate::prelude::twenty_first;
 
 /// Provides summary information about a Block
@@ -25,7 +28,9 @@ pub struct BlockInfo {
     pub cumulative_proof_of_work: ProofOfWork,
     pub difficulty: Difficulty,
     pub num_inputs: usize,
+    pub inputs: Vec<String>,
     pub num_outputs: usize,
+    pub outputs: Vec<String>,
     pub num_public_announcements: usize,
     pub coinbase_amount: NativeCurrencyAmount,
     pub fee: NativeCurrencyAmount,
@@ -33,6 +38,8 @@ pub struct BlockInfo {
     pub is_tip: bool,
     pub is_canonical: bool,
     pub sibling_blocks: Vec<Digest>, // blocks at same height
+    // pub block_kernel2: BlockKernel,
+    pub txid: TransactionKernelId,
 }
 
 // note: this is used by neptune-cli block-info command.
@@ -50,11 +57,13 @@ impl std::fmt::Display for BlockInfo {
             )
             + &format!("difficulty: {}\n", self.difficulty)
             + &format!("num_inputs: {}\n", self.num_inputs)
+            + &format!("inputs: {:#?}\n", self.inputs)
             + &format!("num_outputs: {}\n", self.num_outputs)
             + &format!(
                 "num_public_announcements: {}\n",
                 self.num_public_announcements
             )
+            + &format!("outputs: {:#?}\n", self.outputs)
             + &format!("coinbase_amount: {}\n", self.coinbase_amount)
             + &format!("fee: {}\n", self.fee)
             + &format!("is_genesis: {}\n", self.is_genesis)
@@ -63,6 +72,14 @@ impl std::fmt::Display for BlockInfo {
             + &format!(
                 "sibling_blocks: {}\n",
                 self.sibling_blocks.iter().map(|d| d.to_hex()).join(",")
+            )
+            // + &format!(
+            //     "block_kernel2: {:?}\n",
+            //     self.block_kernel2
+            // )
+            + &format!(
+                "txid: {:?}\n",
+                self.txid,
             );
 
         write!(f, "{}", buf)
@@ -89,7 +106,19 @@ impl BlockInfo {
             difficulty: header.difficulty,
             cumulative_proof_of_work: header.cumulative_proof_of_work,
             num_inputs: body.transaction_kernel.inputs.len(),
+            inputs: body
+                .transaction_kernel
+                .inputs
+                .iter()
+                .map(|input| Tip5::hash(&input.absolute_indices).to_hex())
+                .collect(),
             num_outputs: body.transaction_kernel.outputs.len(),
+            outputs: body
+                .transaction_kernel
+                .outputs
+                .iter()
+                .map(|output| output.canonical_commitment.to_hex())
+                .collect(),
             num_public_announcements: body.transaction_kernel.public_announcements.len(),
             fee: body.transaction_kernel.fee,
             coinbase_amount: block.coinbase_amount(),
@@ -97,6 +126,8 @@ impl BlockInfo {
             is_tip: digest == tip_digest,
             is_canonical,
             sibling_blocks,
+            // block_kernel2: block.kernel.clone(),
+            txid: block.kernel.body.transaction_kernel.txid(),
         }
     }
 
