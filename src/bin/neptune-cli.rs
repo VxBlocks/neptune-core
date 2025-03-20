@@ -382,6 +382,16 @@ enum Command {
         #[clap(long, default_value_t)]
         network: Network,
     },
+
+    PeerConnect {
+        /// The peer to connect to.
+        socket_addr: SocketAddr,
+    },
+
+    PeerDisconnect {
+        /// The peer to disconnect.
+        socket_addr: SocketAddr,
+    },
 }
 
 /// represents top-level cli args
@@ -1159,10 +1169,25 @@ async fn main() -> Result<()> {
             client.restart_miner(ctx, token).await??;
             println!("Command completed successfully");
         }
-
         Command::PruneAbandonedMonitoredUtxos => {
             let prunt_res_count = client.prune_abandoned_monitored_utxos(ctx, token).await??;
             println!("{prunt_res_count} monitored UTXOs marked as abandoned");
+        }
+        Command::PeerConnect { socket_addr } => {
+            let resp = client
+                .peer_connect(
+                    ctx,
+                    token,
+                    socket_addr,
+                ).await?;
+        }
+        Command::PeerDisconnect { socket_addr } => {
+            let resp = client
+                .peer_disconnect(
+                    ctx,
+                    token,
+                    socket_addr,
+                ).await?;
         }
     }
 

@@ -207,6 +207,8 @@ pub(crate) enum RPCServerToMain {
     BroadcastTx(Box<Transaction>),
     BroadcastMempoolTransactions,
     ProofOfWorkSolution(Box<Block>),
+    PeerConnected(SocketAddr),
+    PeerDisconnected(SocketAddr),
     Shutdown,
     PauseMiner,
     RestartMiner,

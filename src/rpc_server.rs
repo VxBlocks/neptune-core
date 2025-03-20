@@ -1838,6 +1838,10 @@ pub trait RPC {
     /// ```
     async fn prune_abandoned_monitored_utxos(token: rpc_auth::Token) -> RpcResult<usize>;
 
+    async fn peer_connect(token: rpc_auth::Token, socket_addr: SocketAddr) -> RpcResult<()>;
+
+    async fn peer_disconnect(token: rpc_auth::Token, socket_addr: SocketAddr) -> RpcResult<()>;
+
     /// Gracious shutdown.
     ///
     /// ```no_run
@@ -3325,6 +3329,28 @@ impl RPC for NeptuneRPCServer {
             .wallet_state
             .get_all_own_coins_with_possible_timelocks(&tip_msa, tip_hash)
             .await)
+    }
+
+    async fn peer_connect(self, _context: ::tarpc::context::Context, token: rpc_auth::Token, socket_addr: SocketAddr) -> RpcResult<()>{
+        log_slow_scope!(fn_name!());
+        token.auth(&self.valid_tokens)?;
+
+        let _ = self
+            .rpc_server_to_main_tx
+            .send(RPCServerToMain::PeerConnected(socket_addr))
+            .await;
+        Ok(())
+    }
+
+    async fn peer_disconnect(self, _context: ::tarpc::context::Context, token: rpc_auth::Token, socket_addr: SocketAddr) -> RpcResult<()>{
+        log_slow_scope!(fn_name!());
+        token.auth(&self.valid_tokens)?;
+
+        let _ = self
+            .rpc_server_to_main_tx
+            .send(RPCServerToMain::PeerDisconnected(socket_addr))
+            .await;
+        Ok(())
     }
 
     // documented in trait. do not add doc-comment.
