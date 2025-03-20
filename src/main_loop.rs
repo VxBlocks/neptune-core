@@ -1774,16 +1774,14 @@ impl MainLoopHandler {
                 let main_to_peer_broadcast_rx = self.main_to_peer_broadcast_tx.subscribe();
                 let peer_task_to_main_tx = self.peer_task_to_main_tx.to_owned();
                 let own_handshake_data = own_handshake_data.clone();
-                call_peer(
+                tokio::spawn(call_peer(
                     socket_addr,
                     global_state_lock,
                     main_to_peer_broadcast_rx,
                     peer_task_to_main_tx,
                     own_handshake_data,
                     1, // All CLI-specified peers have distance 1
-                )
-                .await;
-                info!("Received RPC connect {} ok", socket_addr);
+                ));
                 Ok(false)
             }
             RPCServerToMain::PeerDisconnected(socket_addr) => {
