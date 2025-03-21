@@ -67,13 +67,29 @@ use crate::util_types::mutator_set::addition_record::AdditionRecord;
 use crate::util_types::mutator_set::commit;
 use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulator;
 
-/// Maximum block size in number of `BFieldElement`.
+/// Block height for 1st hardfork that increases block size limit to allow for
+/// more inputs per transaction.
+pub(crate) const BLOCK_HEIGHT_HF_1: BlockHeight = BlockHeight::new(BFieldElement::new(6_000));
+
+/// Old maximum block size in number of `BFieldElement`s.
+pub(crate) const MAX_BLOCK_SIZE_BEFORE_HF_1: usize = 250_000;
+
+/// New maximum block size in number of `BFieldElement`s.
 ///
-/// This number limits the number of outputs in a block's transaction to around
-/// 25000. This limit ensures that it remains feasible to run an archival node
-/// even in the event of denial-of-service attack, where the attacker creates
-/// blocks with many outputs.
-pub(crate) const MAX_BLOCK_SIZE: usize = 250_000;
+/// This size is 8MB which should keep it feasible to run archival nodes for
+/// many years without requiring excessive disk space. With an SWBF MMR of
+/// height 20, this limit allows for 150-200 inputs per block.
+pub(crate) const MAX_BLOCK_SIZE_AFTER_HF_1: usize = 1_000_000;
+
+/// With removal records only represented by their absolute index set, the block
+/// size limit of 1.000.000 `BFieldElement`s allows for a "balanced" block
+/// (equal number of inputs and outputs, no public announcements) of ~10.000
+/// input and outputs. To prevent an attacker from making it costly to run an
+/// archival node, the number of outputs is restricted. For simplicity though
+/// this limit is enforced for inputs, outputs, and public announcements. This
+/// restriction on the number of public announcements also makes it feasible for
+/// wallets to scan through all.
+const MAX_NUM_INPUTS_OUTPUTS_PUB_ANNOUNCEMENTS_AFTER_HF_1: usize = 1 << 14;
 
 /// Duration of timelock for half of all mining rewards.
 ///
@@ -784,7 +800,11 @@ impl Block {
         }
 
         // 1.e)
-        if self.size() > MAX_BLOCK_SIZE {
+        if self.header().height < BLOCK_HEIGHT_HF_1 && self.size() > MAX_BLOCK_SIZE_BEFORE_HF_1 {
+            return Err(BlockValidationError::MaxSize);
+        }
+
+        if self.header().height >= BLOCK_HEIGHT_HF_1 && self.size() > MAX_BLOCK_SIZE_AFTER_HF_1 {
             return Err(BlockValidationError::MaxSize);
         }
 
@@ -853,6 +873,29 @@ impl Block {
         let fee = self.kernel.body.transaction_kernel.fee;
         if fee.is_negative() {
             return Err(BlockValidationError::NegativeFee);
+        }
+
+        if self.header().height >= BLOCK_HEIGHT_HF_1 {
+            // 2.i)
+            if self.body().transaction_kernel.inputs.len()
+                > MAX_NUM_INPUTS_OUTPUTS_PUB_ANNOUNCEMENTS_AFTER_HF_1
+            {
+                return Err(BlockValidationError::TooManyInputs);
+            }
+
+            // 2.j)
+            if self.body().transaction_kernel.outputs.len()
+                > MAX_NUM_INPUTS_OUTPUTS_PUB_ANNOUNCEMENTS_AFTER_HF_1
+            {
+                return Err(BlockValidationError::TooManyOutputs);
+            }
+
+            // 2.k)
+            if self.body().transaction_kernel.public_announcements.len()
+                > MAX_NUM_INPUTS_OUTPUTS_PUB_ANNOUNCEMENTS_AFTER_HF_1
+            {
+                return Err(BlockValidationError::TooManyPublicAnnouncements);
+            }
         }
 
         Ok(())
@@ -1029,6 +1072,12 @@ pub(crate) mod block_tests {
     use crate::config_models::network::Network;
     use crate::database::storage::storage_schema::SimpleRustyStorage;
     use crate::database::NeptuneLevelDb;
+    use crate::mine_loop::composer_parameters::ComposerParameters;
+    use crate::mine_loop::prepare_coinbase_transaction_stateless;
+    use crate::models::blockchain::transaction::primitive_witness::PrimitiveWitness;
+    use crate::models::blockchain::transaction::TransactionProof;
+    use crate::models::blockchain::type_scripts::native_currency::NativeCurrency;
+    use crate::models::blockchain::type_scripts::TypeScript;
     use crate::models::state::tx_proving_capability::TxProvingCapability;
     use crate::models::state::wallet::transaction_output::TxOutput;
     use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
@@ -1088,6 +1137,93 @@ pub(crate) mod block_tests {
 
         let random_height: BFieldElement = random();
         Block::block_subsidy(random_height.into());
+    }
+
+    #[test]
+    fn block_subsidy_generation_0() {
+        let block_height_generation_0 = 199u64.into();
+        assert_eq!(
+            NativeCurrencyAmount::coins(128),
+            Block::block_subsidy(block_height_generation_0)
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn total_block_subsidy_is_128_coins_regardless_of_guesser_fraction() {
+        let network = Network::Main;
+        let a_wallet_secret = WalletEntropy::new_random();
+        let a_key = a_wallet_secret.nth_generation_spending_key_for_tests(0);
+        let genesis = Block::genesis(network);
+        let mut rng: StdRng = SeedableRng::seed_from_u64(2225550001);
+        let now = genesis.header().timestamp + Timestamp::days(1);
+
+        let mut guesser_fraction = 0f64;
+        let step = 0.05;
+        while guesser_fraction + step <= 1f64 {
+            let composer_parameters =
+                ComposerParameters::new(a_key.to_address().into(), rng.random(), guesser_fraction);
+            let (composer_txos, transaction_details) =
+                prepare_coinbase_transaction_stateless(&genesis, composer_parameters, now).unwrap();
+            let coinbase_kernel =
+                PrimitiveWitness::from_transaction_details(&transaction_details).kernel;
+            let coinbase = Transaction {
+                kernel: coinbase_kernel,
+                proof: TransactionProof::invalid(),
+            };
+            let total_composer_reward: NativeCurrencyAmount = composer_txos
+                .iter()
+                .map(|tx_output| tx_output.utxo().get_native_currency_amount())
+                .sum();
+            let block_primitive_witness = BlockPrimitiveWitness::new(genesis.clone(), coinbase);
+            let block_proof_witness = BlockProofWitness::produce(block_primitive_witness.clone());
+            let block1 = Block::new(
+                block_primitive_witness.header(now, None),
+                block_primitive_witness.body().to_owned(),
+                block_proof_witness.appendix(),
+                BlockProof::Invalid,
+            );
+            let total_guesser_reward = block1.total_guesser_reward();
+            let total_miner_reward = total_composer_reward + total_guesser_reward;
+            assert_eq!(NativeCurrencyAmount::coins(128), total_miner_reward);
+
+            println!("guesser_fraction: {guesser_fraction}");
+            println!(
+                "total_composer_reward: {total_guesser_reward}, as nau: {}",
+                total_composer_reward.to_nau()
+            );
+            println!(
+                "total_guesser_reward: {total_guesser_reward}, as nau {}",
+                total_guesser_reward.to_nau()
+            );
+            println!(
+                "total_miner_reward: {total_miner_reward}, as nau {}\n\n",
+                total_miner_reward.to_nau()
+            );
+
+            guesser_fraction += step;
+        }
+    }
+
+    #[test]
+    fn observed_total_mining_reward_matches_block_subsidy() {
+        // Data read from a node composing and guessing on test net. It
+        // composed and guessed block number #115 and got four UTXOs, where the
+        // native currency type script recorded these states. Those states must
+        // sum to the total block subsidy for generation 0, 128 coins. This
+        // were the recorded states for block
+        // a1cd0ea9103c19444dd0342e7c772b0a02ed610b71a73ea37e4fe48357c619bb4fa0c3e866000000
+        let state0 = [0u64, 980281920, 2521720867, 1615].map(BFieldElement::new);
+        let state1 = [0u64, 980281920, 2521720867, 1615].map(BFieldElement::new);
+        let state2 = [0u64, 981467136, 2521720867, 1615].map(BFieldElement::new);
+        let state3 = [0u64, 981467136, 2521720867, 1615].map(BFieldElement::new);
+
+        let mut total_amount = NativeCurrencyAmount::zero();
+        for state in [state0, state1, state2, state3] {
+            total_amount = total_amount + *NativeCurrency.try_decode_state(&state).unwrap();
+        }
+
+        assert_eq!(NativeCurrencyAmount::coins(128), total_amount);
     }
 
     #[tokio::test]
