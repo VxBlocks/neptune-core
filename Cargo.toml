@@ -180,6 +180,9 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 
+[patch.crates-io]
+time = { git = "https://github.com/time-rs/time.git", rev = "d4e39b3"}
+
 # Set to make compilation of Triton VM faster. Since it uses build scripts
 # that should run with `opt-level=3` set.
 [profile.test]
