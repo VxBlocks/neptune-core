@@ -1171,7 +1171,7 @@ async fn main() -> Result<()> {
             println!("{prunt_res_count} monitored UTXOs marked as abandoned");
         }
         Command::PeerConnect { socket_addr } => {
-            let resp = client
+            let _resp = client
                 .peer_connect(
                     ctx,
                     token,
@@ -1179,7 +1179,7 @@ async fn main() -> Result<()> {
                 ).await?;
         }
         Command::PeerDisconnect { socket_addr } => {
-            let resp = client
+            let _resp = client
                 .peer_disconnect(
                     ctx,
                     token,
