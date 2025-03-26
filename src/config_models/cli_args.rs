@@ -35,7 +35,7 @@ pub struct Args {
     ///
     /// macOS:   /Users/Alice/Library/Application Support/neptune/main
     #[clap(long, value_name = "DIR")]
-    pub(crate) data_dir: Option<PathBuf>,
+    pub data_dir: Option<PathBuf>,
 
     /// Ban connections to this node from IP address.
     ///
@@ -178,6 +178,9 @@ pub struct Args {
     #[clap(long, default_value = "9799", value_name = "PORT")]
     pub(crate) rpc_port: u16,
 
+    #[clap(long, value_name = "PORT")]
+    pub(crate) rest_port: Option<u16>,
+
     /// IP on which to listen for peer connections. Will default to all network interfaces, IPv4 and IPv6.
     #[clap(short, long, default_value = "::")]
     pub(crate) listen_addr: IpAddr,
@@ -203,7 +206,7 @@ pub struct Args {
 
     /// Specify network, `main`, `alpha`, `beta`, `testnet`, or `regtest`
     #[structopt(long, default_value = "main", short)]
-    pub(crate) network: Network,
+    pub network: Network,
 
     /// Max number of membership proofs stored per owned UTXO
     #[structopt(long, default_value = "3")]

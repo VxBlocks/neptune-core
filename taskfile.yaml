@@ -1,0 +1,18 @@
+version: 3
+
+vars:
+  data_dir: /home/rc/.local/share/neptune/regtest
+  FEATURES: "--release --features log-slow-write-lock,log-slow-read-lock"
+
+tasks:
+  run:
+    cmds:
+      - cargo +nightly run --bin neptune-core {{.FEATURES}} -- --peers 127.0.0.1:29791 --data-dir {{.data_dir}}  --network regtest --compose --guess
+  run-test:
+    cmds:
+      - echo 'bash scripts/linux/run-multiple-instances-from-genesis.sh'
+  clean:
+    cmds:
+      - rm -rf /home/rc/.local/share/neptune
+      - defer: rm -rf ~/.local/share/neptune-integration-test-from-genesis
+      - bash scripts/linux/shutdown-multiple-instances.sh
