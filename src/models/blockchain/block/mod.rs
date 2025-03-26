@@ -371,7 +371,7 @@ impl Block {
     ///
     /// Includes the guesser-fee UTXOs which are not included by the
     /// `mutator_set_accumulator` field on the block body.
-    pub(crate) fn mutator_set_accumulator_after(&self) -> MutatorSetAccumulator {
+    pub fn mutator_set_accumulator_after(&self) -> MutatorSetAccumulator {
         let mut msa = self.kernel.body.mutator_set_accumulator.clone();
         let mutator_set_update = MutatorSetUpdate::new(vec![], self.guesser_fee_addition_records());
         mutator_set_update.apply_to_accumulator(&mut msa)
@@ -624,6 +624,22 @@ impl Block {
             digest: OnceLock::default(), // calc'd in hash()
             kernel,
             proof: block_proof,
+        }
+    }
+
+    pub fn block_with_invalid_proof(&self) -> Self {
+        Self {
+            digest: self.digest.clone(),
+            kernel: self.kernel.clone(),
+            proof: BlockProof::Invalid,
+        }
+    }
+
+    pub fn block_template_with_invalid_proof(&self) -> Self {
+        Self {
+            digest: OnceLock::default(),
+            kernel: self.kernel.clone(),
+            proof: BlockProof::Invalid,
         }
     }
 

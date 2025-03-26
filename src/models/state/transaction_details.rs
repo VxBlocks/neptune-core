@@ -17,7 +17,7 @@ use crate::util_types::mutator_set::mutator_set_accumulator::MutatorSetAccumulat
 /// Information, fetched from the state of the node, required to generate a
 /// transaction.
 #[derive(Debug, Clone)]
-pub(crate) struct TransactionDetails {
+pub struct TransactionDetails {
     pub tx_inputs: Vec<UnlockedUtxo>,
     pub tx_outputs: TxOutputList,
     pub fee: NativeCurrencyAmount,
@@ -142,7 +142,7 @@ impl TransactionDetails {
     /// - mutator set membership proofs, must be valid wrt. supplied mutator set
     ///
     /// See also: [Self::new_with_coinbase].
-    pub(crate) fn new_without_coinbase(
+    pub fn new_without_coinbase(
         tx_inputs: Vec<UnlockedUtxo>,
         tx_outputs: TxOutputList,
         fee: NativeCurrencyAmount,

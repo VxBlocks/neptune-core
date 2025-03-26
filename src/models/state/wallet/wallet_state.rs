@@ -233,7 +233,7 @@ impl WalletState {
     ///
     /// Convenience method to extract required data prior to calling the
     /// canonical constructor, [`Self::new`].
-    pub(crate) async fn new_from_context(
+    pub async fn new_from_context(
         data_dir: &DataDirectory,
         wallet_file_context: WalletFileContext,
         cli_args: &Args,
@@ -386,7 +386,7 @@ impl WalletState {
 
     /// Extract `ExpectedUtxo`s from the `TxOutputList` that require off-chain
     /// notifications and that are destined for this wallet.
-    pub(crate) fn extract_expected_utxos(
+    pub fn extract_expected_utxos(
         &self,
         tx_outputs: TxOutputList,
         notifier: UtxoNotifier,
@@ -569,7 +569,7 @@ impl WalletState {
     }
 
     /// adds a [SentTransaction] to the wallet db
-    pub(crate) async fn add_sent_transaction(&mut self, sent_transaction: SentTransaction) {
+    pub async fn add_sent_transaction(&mut self, sent_transaction: SentTransaction) {
         self.wallet_db
             .sent_transactions_mut()
             .push(sent_transaction)
@@ -585,7 +585,7 @@ impl WalletState {
     /// ie to limit how many payments the wallet can send per block.
     ///
     /// once send-rate limiting is disabled, this fn can probably be removed.
-    pub(crate) async fn count_sent_transactions_at_block(&self, block: Digest) -> usize {
+    pub async fn count_sent_transactions_at_block(&self, block: Digest) -> usize {
         let list = self.wallet_db.sent_transactions();
         let len = list.len().await;
 
@@ -629,7 +629,7 @@ impl WalletState {
     // synchronize them after the Tx is confirmed.
     //
     // Discussion: https://github.com/Neptune-Crypto/neptune-core/pull/136
-    pub(crate) async fn add_expected_utxos(
+    pub async fn add_expected_utxos(
         &mut self,
         expected_utxos: impl IntoIterator<Item = ExpectedUtxo>,
     ) {
@@ -1166,7 +1166,7 @@ impl WalletState {
     ///
     /// Assume the given block is valid and that the wallet state is not synced
     /// with the new block yet but is synced with the previous block (if any).
-    pub(crate) async fn update_wallet_state_with_new_block(
+    pub async fn update_wallet_state_with_new_block(
         &mut self,
         previous_mutator_set_accumulator: &MutatorSetAccumulator,
         new_block: &Block,
@@ -1644,7 +1644,7 @@ impl WalletState {
     ///
     /// Requested amount `total_spend` must include fees that are paid in the
     /// transaction.
-    pub(crate) async fn allocate_sufficient_input_funds(
+    pub async fn allocate_sufficient_input_funds(
         &self,
         total_spend: NativeCurrencyAmount,
         tip_digest: Digest,

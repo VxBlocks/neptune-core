@@ -119,7 +119,7 @@ impl TxOutput {
 
     /// Instantiate a [TxOutput] for native currency intended fro on-chain UTXO
     /// notification.
-    pub(crate) fn onchain_native_currency(
+    pub fn onchain_native_currency(
         amount: NativeCurrencyAmount,
         sender_randomness: Digest,
         receiving_address: ReceivingAddress,
@@ -137,7 +137,7 @@ impl TxOutput {
 
     /// Instantiate a [TxOutput] for native currency intended for off-chain UTXO
     /// notification.
-    pub(crate) fn offchain_native_currency(
+    pub fn offchain_native_currency(
         amount: NativeCurrencyAmount,
         sender_randomness: Digest,
         receiving_address: ReceivingAddress,
@@ -328,7 +328,7 @@ impl TxOutputList {
         public_announcements
     }
 
-    pub(crate) fn private_notifications(&self, network: Network) -> Vec<PrivateNotificationData> {
+    pub fn private_notifications(&self, network: Network) -> Vec<PrivateNotificationData> {
         let mut private_utxo_notifications = vec![];
         for tx_output in &self.0 {
             if let Some((ciphertext, receiver_address)) = tx_output.private_notification(network) {
@@ -354,7 +354,7 @@ impl TxOutputList {
         self.0.push(tx_output);
     }
 
-    pub(crate) fn concat_with<T>(mut self, maybe_tx_output: T) -> Self
+    pub fn concat_with<T>(mut self, maybe_tx_output: T) -> Self
     where
         T: IntoIterator<Item = TxOutput>,
     {

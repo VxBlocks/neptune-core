@@ -145,7 +145,7 @@ pub(crate) async fn prove_consensus_program(
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct TritonVmProofJobOptions {
+pub struct TritonVmProofJobOptions {
     pub job_priority: TritonVmJobPriority,
     pub job_settings: ProverJobSettings,
     pub cancel_job_rx: Option<tokio::sync::watch::Receiver<()>>,
