@@ -1,19 +1,19 @@
 pub mod address;
 pub mod coin_with_possible_timelock;
-pub(crate) mod expected_utxo;
+pub mod expected_utxo;
 pub(crate) mod incoming_utxo;
 pub(crate) mod monitored_utxo;
 pub(crate) mod rusty_wallet_database;
 pub(crate) mod scan_mode_configuration;
 pub mod secret_key_material;
 pub mod sent_transaction;
-pub(crate) mod transaction_output;
+pub mod transaction_output;
 pub(crate) mod unlocked_utxo;
 pub mod utxo_notification;
-pub(crate) mod wallet_configuration;
+pub mod wallet_configuration;
 pub(crate) mod wallet_entropy;
 pub mod wallet_file;
-pub(crate) mod wallet_state;
+pub mod wallet_state;
 pub mod wallet_status;
 
 #[cfg(test)]

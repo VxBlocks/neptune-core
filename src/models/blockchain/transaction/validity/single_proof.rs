@@ -225,7 +225,7 @@ impl SingleProof {
     /// witness.
     ///
     /// This involves generating a [ProofCollection] as an intermediate step.
-    pub(crate) async fn produce(
+    pub async fn produce(
         primitive_witness: &PrimitiveWitness,
         triton_vm_job_queue: &TritonVmJobQueue,
         proof_job_options: TritonVmProofJobOptions,

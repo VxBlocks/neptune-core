@@ -28,6 +28,9 @@ pub mod util_types;
 #[cfg(test)]
 pub mod tests;
 
+#[cfg(feature = "rest")]
+pub mod jsonrpc_server;
+
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -280,6 +283,38 @@ pub async fn initialize(cli_args: cli_args::Args) -> Result<i32> {
     // as possible, so requests do not hang while initialization code runs.
     let (rpc_server_to_main_tx, rpc_server_to_main_rx) =
         mpsc::channel::<RPCServerToMain>(RPC_CHANNEL_CAPACITY);
+
+    #[cfg(feature = "rest")]
+    if let Some(rest_port) = global_state_lock.cli().rest_port {
+        let rest_listener = TcpListener::bind(format!("0.0.0.0:{}", rest_port)).await?;
+
+        let rpc_state_lock = global_state_lock.clone();
+
+        let data_directory = data_directory.clone();
+        let rpc_server_to_main_tx = rpc_server_to_main_tx.clone();
+
+        // each time we start neptune-core a new RPC cookie is generated.
+        let valid_tokens: Vec<rpc_auth::Token> =
+            vec![crate::rpc_auth::Cookie::try_new(&data_directory)
+                .await?
+                .into()];
+
+        let rpc_join_handle = tokio::spawn(async move {
+            let server = rpc_server::NeptuneRPCServer::new(
+                rpc_state_lock.clone(),
+                rpc_server_to_main_tx.clone(),
+                data_directory.clone(),
+                valid_tokens.clone(),
+            );
+
+            jsonrpc_server::run_rpc_server(rest_listener, server)
+                .await
+                .expect("Error in REST server task");
+        });
+        task_join_handles.push(rpc_join_handle);
+        info!("Started REST server");
+    }
+
     let mut rpc_listener = tarpc::serde_transport::tcp::listen(
         format!("127.0.0.1:{}", global_state_lock.cli().rpc_port),
         Json::default,
