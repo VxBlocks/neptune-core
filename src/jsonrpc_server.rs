@@ -59,6 +59,10 @@ pub(crate) async fn run_rpc_server(
                 axum::routing::get(get_block),
             )
             .route(
+                "/rpc/batch_block/{height}/{batch_size}",
+                axum::routing::get(get_batch_block),
+            )
+            .route(
                 "/rpc/block_info/{*block_selector}",
                 axum::routing::get(get_block_info),
             )
@@ -103,6 +107,28 @@ async fn get_block(
     };
 
     Ok(ErasedJson::pretty(block.block_with_invalid_proof()))
+}
+
+async fn get_batch_block(
+    State(rpcstate): State<NeptuneRPCServer>,
+    Path((height, batch_size)): Path<(u64, u64)>,
+) -> Result<Vec<u8>, RestError> {
+    let mut blocks = Vec::with_capacity(batch_size as usize);
+    for cur_height in height..height+batch_size {
+        let block_selector = BlockSelector::Height(cur_height.into());
+        let state = rpcstate.state.lock_guard().await;
+        let Some(digest) = block_selector.as_digest(&state).await else {
+            return Err(RestError("block not found".to_owned()));
+        };
+        let archival_state = state.chain.archival_state();
+        let Some(block) = archival_state.get_block(digest).await? else {
+            return Err(RestError("block not found".to_owned()));
+        };
+
+        blocks.push(block.block_with_invalid_proof());
+    }
+    
+    bincode::serialize(&blocks).map_err(|e| RestError(e.to_string()))
 }
 
 async fn get_utxo_digest(
