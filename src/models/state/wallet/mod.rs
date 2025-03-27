@@ -2,7 +2,7 @@ pub mod address;
 pub mod coin_with_possible_timelock;
 pub mod expected_utxo;
 pub(crate) mod incoming_utxo;
-pub(crate) mod monitored_utxo;
+pub mod monitored_utxo;
 pub(crate) mod rusty_wallet_database;
 pub(crate) mod scan_mode_configuration;
 pub mod secret_key_material;

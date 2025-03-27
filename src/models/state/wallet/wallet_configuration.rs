@@ -20,7 +20,7 @@ pub(crate) struct WalletConfiguration {
     pub(crate) scan_mode: Option<ScanModeConfiguration>,
 
     /// How many mutator set membership proofs to store per monitored UTXO.
-    pub(crate) num_mps_per_utxo: usize,
+    pub num_mps_per_utxo: usize,
 
     /// Where wallet files are stored
     wallet_files_directory: PathBuf,

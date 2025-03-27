@@ -90,13 +90,13 @@ pub struct WalletState {
     known_raw_hash_lock_keys: Vec<SpendingKey>,
 
     /// Tunable options for configuring how the wallet state operates.
-    pub(crate) configuration: WalletConfiguration,
+    pub configuration: WalletConfiguration,
 }
 
 /// Contains the cryptographic (non-public) data that is needed to recover the mutator set
 /// membership proof of a UTXO.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, BFieldCodec)]
-pub(crate) struct IncomingUtxoRecoveryData {
+pub struct IncomingUtxoRecoveryData {
     pub utxo: Utxo,
     pub sender_randomness: Digest,
     pub receiver_preimage: Digest,
@@ -104,13 +104,13 @@ pub(crate) struct IncomingUtxoRecoveryData {
 }
 
 impl IncomingUtxoRecoveryData {
-    pub(crate) fn addition_record(&self) -> AdditionRecord {
+    pub fn addition_record(&self) -> AdditionRecord {
         let item = Tip5::hash(&self.utxo);
         commit(item, self.sender_randomness, self.receiver_preimage.hash())
     }
 
     /// Returns true iff this UTXO is a guesser reward.
-    pub(crate) fn is_guesser_fee(&self) -> bool {
+    pub fn is_guesser_fee(&self) -> bool {
         self.utxo
             .is_lockscript_with_preimage(self.receiver_preimage)
     }
@@ -209,7 +209,7 @@ impl WalletState {
     /// UTXO.
     ///
     /// Uses non-blocking I/O via tokio.
-    pub(crate) async fn read_utxo_ms_recovery_data(&self) -> Result<Vec<IncomingUtxoRecoveryData>> {
+    pub async fn read_utxo_ms_recovery_data(&self) -> Result<Vec<IncomingUtxoRecoveryData>> {
         // Open file
         let incoming_secrets_file = OpenOptions::new()
             .read(true)
@@ -648,7 +648,7 @@ impl WalletState {
     /// this is a no-op.
     ///
     /// Assumes that the cache agrees with the database.
-    pub(crate) async fn add_raw_hash_key(&mut self, preimage: Digest) {
+    pub async fn add_raw_hash_key(&mut self, preimage: Digest) {
         let as_key = SpendingKey::RawHashLock(HashLockKey::from_preimage(preimage));
         if self.known_raw_hash_lock_keys.contains(&as_key) {
             return;

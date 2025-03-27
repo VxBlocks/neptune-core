@@ -87,7 +87,7 @@ impl Display for MonitoredUtxo {
 }
 
 impl MonitoredUtxo {
-    pub(crate) fn new(utxo: Utxo, max_number_of_mps_stored: usize) -> Self {
+    pub fn new(utxo: Utxo, max_number_of_mps_stored: usize) -> Self {
         Self {
             utxo,
             blockhash_to_membership_proof: VecDeque::default(),
@@ -99,7 +99,7 @@ impl MonitoredUtxo {
     }
 
     /// Return the addition record associated with this UTXO.
-    pub(crate) fn addition_record(&self) -> AdditionRecord {
+    pub fn addition_record(&self) -> AdditionRecord {
         let item = Tip5::hash(&self.utxo);
         let (_block, msmp) = self
         .get_latest_membership_proof_entry()
@@ -109,7 +109,7 @@ impl MonitoredUtxo {
     }
 
     /// Return the AOCL index in which this UTXO was added
-    pub(crate) fn aocl_index(&self) -> u64 {
+    pub fn aocl_index(&self) -> u64 {
         let (_block, msmp) = self
             .get_latest_membership_proof_entry()
             .unwrap_or_else(|| panic!("All monitored UTXOs must have at least one membership proof. Couldn't find one for {self:?}"));

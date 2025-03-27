@@ -74,7 +74,7 @@ pub(crate) struct ArchivalState {
 
     // The archival mutator set is persisted to one database that also records a sync label,
     // which corresponds to the hash of the block to which the mutator set is synced.
-    pub(crate) archival_mutator_set: RustyArchivalMutatorSet,
+    pub archival_mutator_set: RustyArchivalMutatorSet,
 
     /// Archival-MMR of the block digests belonging to the canonical chain.
     pub(crate) archival_block_mmr: RustyArchivalBlockMmr,
@@ -580,7 +580,7 @@ impl ArchivalState {
 
     /// Return the block digest of the block in which an AOCL leaf with
     /// specified index is contained.
-    pub(crate) async fn canonical_block_digest_of_aocl_index(
+    pub async fn canonical_block_digest_of_aocl_index(
         &self,
         aocl_leaf_index: u64,
     ) -> Result<Option<Digest>> {
@@ -759,7 +759,7 @@ impl ArchivalState {
         Some(parent.expect("Indicated block must exist"))
     }
 
-    pub(crate) async fn get_block_header(&self, block_digest: Digest) -> Option<BlockHeader> {
+    pub async fn get_block_header(&self, block_digest: Digest) -> Option<BlockHeader> {
         let mut ret = self
             .block_index_db
             .get(BlockIndexKey::Block(block_digest))
