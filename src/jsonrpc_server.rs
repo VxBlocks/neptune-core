@@ -9,6 +9,7 @@ use axum::{
 use axum_extra::response::ErasedJson;
 use block_selector::BlockSelectorExtended;
 use itertools::Itertools;
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -73,6 +74,10 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/mempool/{start_index}/{number}",
                 axum::routing::get(get_mempool),
+            )
+            .route(
+                "/rpc/blocks_time/{start}/{end}",
+                axum::routing::get(get_blocks_time),
             );
 
         routes
@@ -118,11 +123,11 @@ async fn get_batch_block(
         let block_selector = BlockSelector::Height(cur_height.into());
         let state = rpcstate.state.lock_guard().await;
         let Some(digest) = block_selector.as_digest(&state).await else {
-            return Err(RestError("block not found".to_owned()));
+            break;
         };
         let archival_state = state.chain.archival_state();
         let Some(block) = archival_state.get_block(digest).await? else {
-            return Err(RestError("block not found".to_owned()));
+            break;
         };
 
         blocks.push(block.block_with_invalid_proof());
@@ -235,6 +240,37 @@ async fn get_mempool(
         .collect_vec();
 
     Ok(ErasedJson::pretty(mempool_transactions))
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+struct BlockTime {
+    height: u64,
+    time: u64,
+}
+
+async fn get_blocks_time(
+    State(rpcstate): State<NeptuneRPCServer>,
+    Path((start, end)): Path<(u64, u64)>,
+) -> Result<ErasedJson, RestError> {
+    let mut block_time_list = Vec::with_capacity((end - start + 1) as usize);
+    for cur_height in start..=end {
+        let block_selector = BlockSelector::Height(cur_height.into());
+        let state = rpcstate.state.lock_guard().await;
+        let Some(digest) = block_selector.as_digest(&state).await else {
+            break;
+        };
+        let archival_state = state.chain.archival_state();
+        let Some(block) = archival_state.get_block(digest).await? else {
+            break;
+        };
+
+        block_time_list.push(BlockTime {
+            height: block.header().height.into(),
+            time: block.header().timestamp.to_millis() / 1000,
+        });
+    }
+    
+    Ok(ErasedJson::pretty(block_time_list))
 }
 
 mod block_selector {
