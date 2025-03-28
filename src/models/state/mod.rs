@@ -576,6 +576,52 @@ impl GlobalState {
         history
     }
 
+    /// Retrieve wallet balance history
+    pub async fn get_guess_balance_history(
+        &self,
+    ) -> Vec<(Digest, Timestamp, BlockHeight, NativeCurrencyAmount)> {
+        let current_tip_digest = self.chain.light_state().hash();
+
+        let monitored_utxos = self.wallet_state.wallet_db.monitored_utxos();
+
+        let mut history = vec![];
+
+        let stream = monitored_utxos.stream_values().await;
+        pin_mut!(stream); // needed for iteration
+
+        let mut temp = (BlockHeight::genesis(), NativeCurrencyAmount::max());
+        
+        while let Some(monitored_utxo) = stream.next().await {
+            let Some(_msmp) = monitored_utxo.membership_proof_ref_for_block(current_tip_digest)
+            else {
+                continue;
+            };
+
+            if let Some((confirming_block, confirmation_timestamp, confirmation_height)) =
+                monitored_utxo.confirmed_in_block
+            {
+                let amount = monitored_utxo.utxo.get_native_currency_amount();
+                if temp == (confirmation_height, amount) {
+                    history.push((
+                        confirming_block,
+                        confirmation_timestamp,
+                        confirmation_height,
+                        amount,
+                    ));
+                    history.push((
+                        confirming_block,
+                        confirmation_timestamp,
+                        confirmation_height,
+                        amount,
+                    ));
+                } else {
+                    temp = (confirmation_height, amount);
+                }
+            }
+        }
+        history
+    }
+
     /// Generate a change UTXO to ensure that the difference in input amount
     /// and output amount goes back to us. Return the UTXO in a format compatible
     /// with claiming it later on.
