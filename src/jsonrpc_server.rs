@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use crate::models::blockchain::transaction::Transaction;
+use crate::models::proof_abstractions::timestamp::Timestamp;
+use crate::RPCServerToMain;
 use axum::extract::{Path, State};
+use axum::Json;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use axum_extra::response::ErasedJson;
 use block_selector::BlockSelectorExtended;
-use num_traits::Zero;
-use crate::models::proof_abstractions::timestamp::Timestamp;
 use itertools::Itertools;
+use num_traits::Zero;
 use serde::Serialize;
 use tasm_lib::prelude::Digest;
 use tokio::net::TcpListener;
@@ -83,9 +86,14 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/blocks_time/{start}/{end}",
                 axum::routing::get(get_blocks_time),
-            ).route(
+            )
+            .route(
                 "/rpc/guess_reward/{start}/{end}",
                 axum::routing::get(get_guess_reward),
+            )
+            .route(
+                "/rpc/tx/broadcast",
+                axum::routing::post(broadcast_transaction),
             );
 
         routes
@@ -127,7 +135,7 @@ async fn get_batch_block(
     Path((height, batch_size)): Path<(u64, u64)>,
 ) -> Result<Vec<u8>, RestError> {
     let mut blocks = Vec::with_capacity(batch_size as usize);
-    for cur_height in height..height+batch_size {
+    for cur_height in height..height + batch_size {
         let block_selector = BlockSelector::Height(cur_height.into());
         let state = rpcstate.state.lock_guard().await;
         let Some(digest) = block_selector.as_digest(&state).await else {
@@ -140,7 +148,7 @@ async fn get_batch_block(
 
         blocks.push(block.block_with_invalid_proof());
     }
-    
+
     bincode::serialize(&blocks).map_err(|e| RestError(e.to_string()))
 }
 
@@ -277,7 +285,7 @@ async fn get_blocks_time(
             time: block.header().timestamp.to_millis() / 1000,
         });
     }
-    
+
     Ok(ErasedJson::pretty(block_time_list))
 }
 
@@ -302,31 +310,28 @@ async fn get_guess_reward(
 ) -> Result<ErasedJson, RestError> {
     let mut block_time_list = Vec::with_capacity((end - start + 1) as usize);
     let global_state = rpcstate.state.lock_guard().await;
-    
+
     let history = global_state.get_guess_balance_history().await;
 
     // sort
-    let mut display_history: Vec<(Digest, BlockHeight, Timestamp, NativeCurrencyAmount)> =
-        history
-            .iter()
-            .map(|(h, t, bh, a)| (*h, *bh, *t, *a))
-            .collect::<Vec<_>>();
+    let mut display_history: Vec<(Digest, BlockHeight, Timestamp, NativeCurrencyAmount)> = history
+        .iter()
+        .map(|(h, t, bh, a)| (*h, *bh, *t, *a))
+        .collect::<Vec<_>>();
     display_history.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    
+
     let mut reward = NativeCurrencyAmount::zero();
     for (h, t, bh, a) in display_history {
-        if t < start.into() || t > end.into()  {
+        if t < start.into() || t > end.into() {
             continue;
         }
         reward = reward + a;
-        block_time_list.push(
-            RewardCard {
-                block_id: h,
-                block_height: t,
-                timestamp: bh,
-                amount: a.to_string(),
-            },
-        )
+        block_time_list.push(RewardCard {
+            block_id: h,
+            block_height: t,
+            timestamp: bh,
+            amount: a.to_string(),
+        })
     }
 
     let guess_reward = GuessReward {
@@ -335,9 +340,26 @@ async fn get_guess_reward(
         reward: reward.to_string(),
         records: block_time_list,
     };
-    
-    
+
     Ok(ErasedJson::pretty(guess_reward))
+}
+
+async fn broadcast_transaction(
+    State(rpcstate): State<NeptuneRPCServer>,
+    Json(tx): Json<Transaction>,
+) -> Result<ErasedJson, RestError> {
+    // Send transaction message to main
+    let response = rpcstate
+        .rpc_server_to_main_tx
+        .send(RPCServerToMain::BroadcastTx(Box::new(tx.clone())))
+        .await;
+
+    if let Err(e) = response {
+        tracing::error!("Could not send Tx to main task: error: {}", e.to_string());
+        return Err(RestError("Could not send Tx to main task".to_string()));
+    };
+
+    Ok(ErasedJson::pretty(tx.kernel))
 }
 
 mod block_selector {
