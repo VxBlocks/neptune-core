@@ -1423,7 +1423,6 @@ impl MainLoopHandler {
         let mut mp_resync_interval = time::interval(MP_RESYNC_INTERVAL);
         mp_resync_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // Explore node for transactions that not need to be upgraded.
         // let mut tx_proof_upgrade_interval = time::interval(TRANSACTION_UPGRADE_CHECK_INTERVAL);
         // tx_proof_upgrade_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -1727,6 +1726,16 @@ impl MainLoopHandler {
                         }
                     };
                 }
+                Ok(false)
+            }
+            RPCServerToMain::ClearMempool => {
+                info!("Clearing mempool");
+                self.global_state_lock
+                    .lock_guard_mut()
+                    .await
+                    .mempool_clear()
+                    .await;
+
                 Ok(false)
             }
             RPCServerToMain::ProofOfWorkSolution(new_block) => {

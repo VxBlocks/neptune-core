@@ -8,7 +8,7 @@ pub mod mining_status;
 pub mod networking_state;
 pub mod shared;
 pub mod transaction_details;
-pub(crate) mod transaction_kernel_id;
+pub mod transaction_kernel_id;
 pub mod tx_proving_capability;
 pub mod wallet;
 
@@ -39,6 +39,7 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 use transaction_details::TransactionDetails;
+use transaction_kernel_id::TransactionKernelId;
 use twenty_first::math::digest::Digest;
 use tx_proving_capability::TxProvingCapability;
 use wallet::address::ReceivingAddress;
@@ -343,6 +344,8 @@ impl GlobalState {
             .await
     }
 
+    /// The block height in which the latest UTXO was either spent or received.
+    /// `None` if this wallet never received a UTXO.
     pub async fn get_latest_balance_height(&self) -> Option<BlockHeight> {
         let (height, time_secs) =
             time_fn_call_async(self.get_latest_balance_height_internal()).await;
@@ -396,20 +399,22 @@ impl GlobalState {
         )
     }
 
-    pub(crate) fn composer_parameters(
-        &self,
-        reward_address: ReceivingAddress,
-    ) -> ComposerParameters {
-        let next_block_height: BlockHeight = self.chain.light_state().header().height.next();
-        let sender_randomness_for_composer = self
-            .wallet_state
-            .wallet_entropy
-            .generate_sender_randomness(next_block_height, reward_address.privacy_digest());
-
-        ComposerParameters::new(
-            reward_address,
-            sender_randomness_for_composer,
+    /// Automatically assemble the composer parameters for composing the next
+    /// block from the state.
+    ///
+    /// The next block height is passed as an argument as opposed to being read
+    /// from state since the caller needs to declare it to resolve race
+    /// conditions.
+    ///
+    /// # Panics
+    ///
+    ///  - If `next_block_height` is genesis.
+    pub(crate) fn composer_parameters(&self, next_block_height: BlockHeight) -> ComposerParameters {
+        assert!(!next_block_height.is_genesis());
+        self.wallet_state.composer_parameters(
+            next_block_height,
             self.cli.guesser_fraction,
+            self.cli.fee_notification,
         )
     }
 
@@ -1036,12 +1041,16 @@ impl GlobalState {
 
             for incoming_utxo in incoming_utxos {
                 let new_value = seen_recovery_entries.insert(Tip5::hash(&incoming_utxo));
-                assert!(
-                    new_value,
-                    "Recovery data may not contain duplicated entries. Entry with AOCL index {} \
-                     was duplicated. Try removing the duplicated entry from the file.",
-                    incoming_utxo.aocl_index
-                );
+
+                // Ensure duplicated entries are filtered out.
+                if !new_value {
+                    warn!(
+                        "Recovery data contains duplicated entries. Entry with AOCL index {} \
+                     was duplicated.",
+                        incoming_utxo.aocl_index
+                    );
+                    continue;
+                }
 
                 if mutxos
                     .get(&(incoming_utxo.aocl_index, incoming_utxo.addition_record()))
@@ -1740,6 +1749,12 @@ impl GlobalState {
         self.cli().max_num_proofs
     }
 
+    /// Remove one transaction from the mempool and notify wallet of changes.
+    pub(crate) async fn mempool_remove(&mut self, transaction_id: TransactionKernelId) {
+        let events = self.mempool.remove(transaction_id);
+        self.wallet_state.handle_mempool_events(events).await;
+    }
+
     /// clears all Tx from mempool and notifies wallet of changes.
     pub async fn mempool_clear(&mut self) {
         let events = self.mempool.clear();
@@ -1785,8 +1800,8 @@ mod global_state_tests {
     use crate::tests::shared::fake_valid_successor_for_tests;
     use crate::tests::shared::invalid_empty_block;
     use crate::tests::shared::make_mock_block;
-    use crate::tests::shared::make_mock_block_guesser_preimage_and_guesser_fraction;
     use crate::tests::shared::mock_genesis_global_state;
+    use crate::tests::shared::state_with_premine_and_self_mined_blocks;
     use crate::tests::shared::wallet_state_has_all_valid_mps;
 
     mod handshake {
@@ -2013,29 +2028,107 @@ mod global_state_tests {
 
     #[traced_test]
     #[tokio::test]
+    async fn restore_monitored_utxos_from_recovery_data_duplicated_entries() {
+        // Verify that duplicated entries in `incoming_randomness.dat` are
+        // handled correctly.
+        let network = Network::Main;
+        let mut rng = rand::rng();
+        let mut state = state_with_premine_and_self_mined_blocks(network, &mut rng, 1).await;
+        let mut state = state.lock_guard_mut().await;
+        let orignal_mutxos = state
+            .wallet_state
+            .wallet_db
+            .monitored_utxos()
+            .get_all()
+            .await;
+        assert_eq!(
+            5,
+            orignal_mutxos.len(),
+            "Expected one premine, four mining rewards"
+        );
+
+        // Clear databases, to verify recovery works.
+        state
+            .wallet_state
+            .wallet_db
+            .monitored_utxos_mut()
+            .clear()
+            .await;
+        state.wallet_state.clear_raw_hash_keys().await;
+        state
+            .wallet_state
+            .wallet_db
+            .expected_utxos_mut()
+            .clear()
+            .await;
+
+        let recovery_data = state
+            .wallet_state
+            .read_utxo_ms_recovery_data()
+            .await
+            .unwrap();
+        assert_eq!(
+            5,
+            recovery_data.len(),
+            "Expected five entries in recovery data"
+        );
+
+        // Add duplicated entries to recovery data
+        for recovery_element in recovery_data {
+            state
+                .wallet_state
+                .store_utxo_ms_recovery_data(recovery_element)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            10,
+            state
+                .wallet_state
+                .read_utxo_ms_recovery_data()
+                .await
+                .unwrap()
+                .len(),
+            "Expected ten entries in recovery data"
+        );
+        assert!(
+            state
+                .wallet_state
+                .wallet_db
+                .monitored_utxos()
+                .is_empty()
+                .await,
+            "List of monitored UTXOs must be empty before attempting recovery"
+        );
+
+        // Perform this recovery, with duplicated entries. And verify that
+        // the original list of monitored UTXOs is recovered.
+        state
+            .restore_monitored_utxos_from_recovery_data()
+            .await
+            .unwrap();
+        let recovered_mutxos = state
+            .wallet_state
+            .wallet_db
+            .monitored_utxos()
+            .get_all()
+            .await;
+        for (original, recovered) in orignal_mutxos.into_iter().zip_eq(recovered_mutxos) {
+            assert_eq!(original.utxo, recovered.utxo);
+            assert_eq!(
+                original.get_latest_membership_proof_entry().unwrap(),
+                recovered.get_latest_membership_proof_entry().unwrap()
+            );
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
     async fn restore_monitored_utxos_from_recovery_data_test() {
         let network = Network::Main;
         let mut rng = rand::rng();
-        let wallet = WalletEntropy::devnet_wallet();
-        let own_key = wallet.nth_generation_spending_key_for_tests(0);
         let mut global_state_lock =
-            mock_genesis_global_state(network, 2, wallet.clone(), cli_args::Args::default()).await;
-        let genesis_block = Block::genesis(network);
-        let guesser_preimage = wallet.guesser_preimage(genesis_block.hash());
-        let (block1, composer_utxos) = make_mock_block_guesser_preimage_and_guesser_fraction(
-            &genesis_block,
-            None,
-            own_key,
-            rng.random(),
-            0.5,
-            guesser_preimage,
-        )
-        .await;
-
-        global_state_lock
-            .set_new_self_composed_tip(block1.clone(), composer_utxos)
-            .await
-            .unwrap();
+            state_with_premine_and_self_mined_blocks(network, &mut rng, 1).await;
 
         // Delete everything from monitored UTXO and from raw-hash keys.
         let mut global_state = global_state_lock.lock_guard_mut().await;
@@ -2101,6 +2194,12 @@ mod global_state_tests {
 
         // Recover the MUTXO from the recovery data, and verify that MUTXOs are restored
         // Also verify that this operation is idempotent by running it multiple times.
+        let genesis_block = Block::genesis(network);
+        let block1 = global_state.chain.archival_state().get_tip().await;
+        let block1_guesser_preimage = global_state
+            .wallet_state
+            .wallet_entropy
+            .guesser_preimage(genesis_block.hash());
         for _ in 0..3 {
             global_state
                 .restore_monitored_utxos_from_recovery_data()
@@ -2162,7 +2261,7 @@ mod global_state_tests {
                 .collect_vec();
             assert_eq!(
                 vec![SpendingKey::RawHashLock(HashLockKey::from_preimage(
-                    guesser_preimage
+                    block1_guesser_preimage
                 ))],
                 cached_hash_lock_keys,
                 "Cached hash lock keys must match expected value after recovery"
@@ -2174,7 +2273,7 @@ mod global_state_tests {
                 .get_all()
                 .await;
             assert_eq!(
-                vec![guesser_preimage],
+                vec![block1_guesser_preimage],
                 persisted_hash_lock_keys,
                 "Persisted hash lock keys must match expected value after recovery"
             );
@@ -2190,7 +2289,7 @@ mod global_state_tests {
             network,
             2,
             WalletEntropy::devnet_wallet(),
-            cli_args::Args::default(),
+            cli_args::Args::default_with_network(network),
         )
         .await;
         let mut alice = alice_state_lock.lock_guard_mut().await;
@@ -2541,13 +2640,12 @@ mod global_state_tests {
         let mut rng: StdRng = StdRng::seed_from_u64(0x03ce12210c467f93u64);
         let network = Network::Main;
 
-        let mut premine_receiver = mock_genesis_global_state(
-            network,
-            3,
-            WalletEntropy::devnet_wallet(),
-            cli_args::Args::default(),
-        )
-        .await;
+        let cli_args = cli_args::Args {
+            guesser_fraction: 0.0,
+            ..Default::default()
+        };
+        let mut premine_receiver =
+            mock_genesis_global_state(network, 3, WalletEntropy::devnet_wallet(), cli_args).await;
         let genesis_spending_key = premine_receiver
             .lock_guard()
             .await
@@ -2571,11 +2669,9 @@ mod global_state_tests {
         let in_seven_months = genesis_block.kernel.header.timestamp + Timestamp::months(7);
         let in_eight_months = in_seven_months + Timestamp::months(1);
 
-        let guesser_fraction = 0f64;
         let (coinbase_transaction, coinbase_expected_utxos) = make_coinbase_transaction_from_state(
             &genesis_block,
             &premine_receiver,
-            guesser_fraction,
             in_seven_months,
             TxProvingCapability::SingleProof,
             TritonVmJobPriority::Normal.into(),
@@ -2886,7 +2982,6 @@ mod global_state_tests {
                 .light_state()
                 .clone(),
             &premine_receiver,
-            guesser_fraction,
             in_seven_months,
             TxProvingCapability::SingleProof,
             TritonVmJobPriority::Normal.into(),
@@ -2981,16 +3076,12 @@ mod global_state_tests {
 
     #[tokio::test]
     async fn favor_incoming_block_proposal_test() {
-        async fn block1_proposal(
-            guesser_fraction: f64,
-            global_state_lock: &GlobalStateLock,
-        ) -> Block {
+        async fn block1_proposal(global_state_lock: &GlobalStateLock) -> Block {
             let genesis_block = Block::genesis(global_state_lock.cli().network);
             let timestamp = genesis_block.header().timestamp + Timestamp::hours(1);
             let (cb, _) = make_coinbase_transaction_from_state(
                 &genesis_block,
                 global_state_lock,
-                guesser_fraction,
                 timestamp,
                 TxProvingCapability::PrimitiveWitness,
                 (TritonVmJobPriority::Normal, None).into(),
@@ -3002,17 +3093,35 @@ mod global_state_tests {
         }
 
         let network = Network::Main;
-        let mut global_state_lock = mock_genesis_global_state(
+        let mut global_state_lock_small = mock_genesis_global_state(
             network,
             2,
             WalletEntropy::devnet_wallet(),
-            cli_args::Args::default_with_network(network),
+            cli_args::Args {
+                network,
+                guesser_fraction: 0.1,
+                ..Default::default()
+            },
         )
         .await;
-        let small_guesser_fraction = block1_proposal(0.1, &global_state_lock).await;
-        let big_guesser_fraction = block1_proposal(0.5, &global_state_lock).await;
+        let global_state_lock_big = mock_genesis_global_state(
+            network,
+            2,
+            WalletEntropy::devnet_wallet(),
+            cli_args::Args {
+                network,
+                guesser_fraction: 0.5,
+                ..Default::default()
+            },
+        )
+        .await;
+        let small_guesser_fraction = block1_proposal(&global_state_lock_small).await;
+        let big_guesser_fraction = block1_proposal(&global_state_lock_big).await;
 
-        let mut state = global_state_lock.global_state_lock.lock_guard_mut().await;
+        let mut state = global_state_lock_small
+            .global_state_lock
+            .lock_guard_mut()
+            .await;
         assert!(
             state
                 .favor_incoming_block_proposal(
@@ -3453,14 +3562,16 @@ mod global_state_tests {
             let (block_3a, composer_expected_utxos_3a) =
                 make_mock_block(&block_2a, None, spending_key, rng.random()).await;
 
+            let cli_args = cli_args::Args {
+                number_of_mps_per_utxo: 30,
+                network,
+                ..Default::default()
+            };
+
             for claim_composer_fees in [false, true] {
-                let mut global_state_lock = mock_genesis_global_state(
-                    network,
-                    2,
-                    wallet_secret.clone(),
-                    cli_args::Args::default(),
-                )
-                .await;
+                let mut global_state_lock =
+                    mock_genesis_global_state(network, 2, wallet_secret.clone(), cli_args.clone())
+                        .await;
                 let mut global_state = global_state_lock.lock_guard_mut().await;
 
                 if claim_composer_fees {
@@ -3719,6 +3830,13 @@ mod global_state_tests {
                 cli_args::Args::default(),
             )
             .await;
+            let charlie_state_lock = mock_genesis_global_state(
+                network,
+                3,
+                WalletEntropy::new_pseudorandom(rng.random()),
+                cli_args::Args::default(),
+            )
+            .await;
 
             // in bob wallet: create receiving address for bob
             let bob_address = {
@@ -3801,11 +3919,11 @@ mod global_state_tests {
                     .await;
 
                 // the block gets mined.
-                // Alice's wallet does not register the composer reward because
-                // it is not expecting it.
+                // Charlie mines the block so that Alice's wallet is not
+                // complicated by composer fees.
                 let (block_1_tx, _) = create_block_transaction_from(
                     &genesis_block,
-                    &alice_state_lock,
+                    &charlie_state_lock,
                     seven_months_post_launch,
                     (TritonVmJobPriority::Normal, None).into(),
                     TxMergeOrigin::ExplicitList(vec![alice_to_bob_tx]),

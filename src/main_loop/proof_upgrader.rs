@@ -5,11 +5,14 @@ use num_traits::Zero;
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
+use tasm_lib::prelude::Digest;
 use tasm_lib::triton_vm::proof::Proof;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 use super::TransactionOrigin;
+use crate::config_models::fee_notification_policy::FeeNotificationPolicy;
 use crate::job_queue::triton_vm::TritonVmJobPriority;
 use crate::job_queue::triton_vm::TritonVmJobQueue;
 use crate::models::blockchain::block::block_height::BlockHeight;
@@ -153,6 +156,17 @@ impl UpgradeJob {
         }
     }
 
+    /// The gobbling fee charged for an upgrade job
+    ///
+    /// Gobbling fees are charged when a transaction is upgraded from
+    /// proof-collection to single-proof, or when two single proofs are merged.
+    /// The other cases are either not worth it, as you need to create a single-
+    /// proof to gobble, or the proof upgrade relates to own funds.
+    ///
+    /// In particular, no fees are charged for updating a transaction's mutator
+    /// set data because doing so would require a single proof and a merge step,
+    /// which would delay that transaction's propagation and confirmation by the
+    /// network. This policy could be revised when proving gets faster.
     fn gobbling_fee(&self) -> NativeCurrencyAmount {
         match self {
             UpgradeJob::ProofCollectionToSingleProof { gobbling_fee, .. } => *gobbling_fee,
@@ -251,6 +265,29 @@ impl UpgradeJob {
         }
     }
 
+    /// Produce an appropriate log message for the case where the transaction is
+    /// no longer confirmable after a successful proof-upgrade. This could be
+    /// because a faster proof-upgrader upgraded the transaction and it got
+    /// mined in the meantime, or in the case of a merge, one of the inputs to
+    /// the merge upgrade got mined.
+    fn double_spend_warn_msg(&self) -> &str {
+        match self {
+            UpgradeJob::Merge { .. } => "Maybe an input to the merge got mined already?",
+            UpgradeJob::PrimitiveWitnessToProofCollection { .. } => {
+                "Your own transaction already got mined?"
+            }
+            UpgradeJob::PrimitiveWitnessToSingleProof { .. } => {
+                "Your own transaction already got mined?"
+            }
+            UpgradeJob::ProofCollectionToSingleProof { .. } => {
+                "Someone else upgraded the proof-collection and mined it?"
+            }
+            UpgradeJob::UpdateMutatorSetData(_) => {
+                "Transaction got mined while this update job was running?"
+            }
+        }
+    }
+
     /// Upgrade transaction proofs, inserts upgraded tx into the mempool and
     /// informs peers of this new transaction.
     pub(crate) async fn handle_upgrade(
@@ -271,6 +308,7 @@ impl UpgradeJob {
         // process in a loop.  in case a new block comes in while processing
         // the current tx, then we can move on to the next, and so on.
         loop {
+            /* Prepare upgrade */
             // Record that we're attempting an upgrade.
             global_state_lock
                 .lock_guard_mut()
@@ -296,7 +334,9 @@ impl UpgradeJob {
                 )
             };
 
+            /* Perform upgrade */
             // No locks may be held here!
+            let offchain_notifications = global_state_lock.cli().fee_notification;
             let (upgraded, expected_utxos) = match upgrade_job
                 .clone()
                 .upgrade(
@@ -304,6 +344,7 @@ impl UpgradeJob {
                     job_options,
                     &wallet_entropy,
                     block_height,
+                    offchain_notifications,
                 )
                 .await
             {
@@ -327,21 +368,30 @@ impl UpgradeJob {
                 }
             };
 
+            /* Check if upgrade resulted in valid transaction */
             upgrade_job = {
                 let mut global_state = global_state_lock.lock_guard_mut().await;
-                // Did we receive a new block while proving? If so, perform an
-                // update also, if this was requested.
+                let tip_mutator_set = global_state
+                    .chain
+                    .light_state()
+                    .mutator_set_accumulator_after();
 
-                let transaction_is_deprecated = upgraded.kernel.mutator_set_hash
-                    != global_state
-                        .chain
-                        .light_state()
-                        .mutator_set_accumulator_after()
-                        .hash();
+                let transaction_is_up_to_date =
+                    upgraded.kernel.mutator_set_hash == tip_mutator_set.hash();
 
-                if !transaction_is_deprecated {
-                    // Happy path
+                if transaction_is_up_to_date {
+                    // Did the transaction get mined while the proof upgrade
+                    // job was running? If so, don't share it or insert it into
+                    // the mempool. Notice that this double-spend check can
+                    // only be made if the mutator set is up to date.
+                    if !upgraded.is_confirmable_relative_to(&tip_mutator_set) {
+                        let verbose_log_msg = upgrade_job.double_spend_warn_msg();
+                        warn!("Upgraded transaction is no longer confirmable. {verbose_log_msg}");
+                        global_state.mempool_remove(upgraded.kernel.txid()).await;
+                        return;
+                    }
 
+                    /* Handle successful upgrade */
                     // Insert tx into mempool before notifying peers, so we're
                     // sure to have it when they ask.
                     global_state
@@ -422,6 +472,43 @@ impl UpgradeJob {
         }
     }
 
+    fn gobbler_notification_method_with_receiver_preimage(
+        own_wallet_entropy: &WalletEntropy,
+        notification_policy: FeeNotificationPolicy,
+    ) -> (UtxoNotifyMethod, Digest) {
+        let gobble_beneficiary_key = match notification_policy {
+            FeeNotificationPolicy::OffChain => {
+                SpendingKey::from(own_wallet_entropy.nth_symmetric_key(0))
+            }
+            FeeNotificationPolicy::OnChainSymmetric => {
+                SpendingKey::from(own_wallet_entropy.nth_symmetric_key(0))
+            }
+            FeeNotificationPolicy::OnChainGeneration => {
+                SpendingKey::from(own_wallet_entropy.nth_generation_spending_key(0))
+            }
+        };
+        let receiver_preimage = gobble_beneficiary_key
+            .privacy_preimage()
+            .expect("gobble beneficiary key cannot be a raw hash lock");
+        let gobble_beneficiary_address = gobble_beneficiary_key
+            .to_address()
+            .expect("gobble beneficiary should have a corresponding address");
+
+        let fee_notification_method = match notification_policy {
+            FeeNotificationPolicy::OffChain => {
+                UtxoNotifyMethod::OffChain(gobble_beneficiary_address)
+            }
+            FeeNotificationPolicy::OnChainSymmetric => {
+                UtxoNotifyMethod::OnChain(gobble_beneficiary_address)
+            }
+            FeeNotificationPolicy::OnChainGeneration => {
+                UtxoNotifyMethod::OnChain(gobble_beneficiary_address)
+            }
+        };
+
+        (fee_notification_method, receiver_preimage)
+    }
+
     /// Execute the proof upgrade.
     ///
     /// Upgrades transactions to a proof of higher quality that is more likely
@@ -434,43 +521,36 @@ impl UpgradeJob {
         proof_job_options: TritonVmProofJobOptions,
         own_wallet_entropy: &WalletEntropy,
         current_block_height: BlockHeight,
+        fee_notification_policy: FeeNotificationPolicy,
     ) -> anyhow::Result<(Transaction, Vec<ExpectedUtxo>)> {
         let gobbling_fee = self.gobbling_fee();
         let mutator_set = self.mutator_set();
         let old_tx_timestamp = self.old_tx_timestamp();
 
-        let (gobbler, expected_utxos) = if gobbling_fee.is_positive() {
+        let (maybe_gobbler, expected_utxos) = if gobbling_fee.is_positive() {
             info!("Producing gobbler-transaction for a value of {gobbling_fee}");
-            let gobble_receiver = own_wallet_entropy.nth_symmetric_key(0);
-            let receiver_preimage = gobble_receiver.privacy_preimage();
-            let gobble_receiver = SpendingKey::Symmetric(gobble_receiver);
-            let gobble_receiver = gobble_receiver.to_address().expect(
-                "gobble receiver should have a corresponding address because it is a symmetric key",
-            );
+            let (utxo_notification_method, receiver_preimage) =
+                Self::gobbler_notification_method_with_receiver_preimage(
+                    own_wallet_entropy,
+                    fee_notification_policy,
+                );
+            let receiver_digest = receiver_preimage.hash();
             let gobbler = TransactionDetails::fee_gobbler(
                 gobbling_fee,
-                own_wallet_entropy.generate_sender_randomness(
-                    current_block_height,
-                    gobble_receiver.privacy_digest(),
-                ),
+                own_wallet_entropy
+                    .generate_sender_randomness(current_block_height, receiver_digest),
                 mutator_set,
                 old_tx_timestamp,
-                // TODO: Consider using `None` here as UTXOs are already
-                // stored as expected UTXOs by wallet.
-                UtxoNotifyMethod::OnChain(gobble_receiver),
+                utxo_notification_method,
             );
-            let expected_utxos = gobbler
-                .tx_outputs
-                .iter()
-                .map(|x| {
-                    ExpectedUtxo::new(
-                        x.utxo(),
-                        x.sender_randomness(),
-                        receiver_preimage,
-                        UtxoNotifier::FeeGobbler,
-                    )
-                })
-                .collect_vec();
+
+            let expected_utxos = if fee_notification_policy == FeeNotificationPolicy::OffChain {
+                gobbler
+                    .tx_outputs
+                    .expected_utxos(UtxoNotifier::FeeGobbler, receiver_preimage)
+            } else {
+                vec![]
+            };
             let gobbler = PrimitiveWitness::from_transaction_details(&gobbler);
             let gobbler_proof =
                 SingleProof::produce(&gobbler, triton_vm_job_queue, proof_job_options.clone())
@@ -510,7 +590,7 @@ impl UpgradeJob {
                     proof: TransactionProof::SingleProof(single_proof),
                 };
 
-                let tx = if let Some(gobbler) = gobbler {
+                let tx = if let Some(gobbler) = maybe_gobbler {
                     let lhs = gobbler;
                     let rhs = upgraded_tx;
 
@@ -558,7 +638,7 @@ impl UpgradeJob {
                 .await?;
                 info!("Proof-upgrader, merge: Done");
 
-                if let Some(gobbler) = gobbler {
+                if let Some(gobbler) = maybe_gobbler {
                     ret = gobbler
                         .merge_with(
                             ret,
@@ -614,40 +694,47 @@ impl UpgradeJob {
 
 /// Return an [UpgradeJob] that describes work that can be done to upgrade the
 /// proof-quality of a transaction found in mempool. Also indicates whether the
-/// upgrade job affects one of our own transaction, or a foreign transaction.
+/// upgrade job affects one of our own transactions, or a foreign transaction.
 pub(super) fn get_upgrade_task_from_mempool(
     global_state: &GlobalState,
 ) -> Option<(UpgradeJob, TransactionOrigin)> {
-    // Do we have any `ProofCollection`s?
-    let tip = global_state.chain.light_state();
+    let tip_mutator_set = global_state
+        .chain
+        .light_state()
+        .mutator_set_accumulator_after();
     let gobbling_fraction = global_state.gobbling_fraction();
     let min_gobbling_fee = global_state.min_gobbling_fee();
     let num_proofs_threshold = global_state.max_num_proofs();
 
+    // Do we have any `ProofCollection`s?
     let proof_collection_job = if let Some((kernel, proof, tx_origin)) = global_state
         .mempool
         .most_dense_proof_collection(num_proofs_threshold)
     {
-        let gobbling_fee = kernel.fee.lossy_f64_fraction_mul(gobbling_fraction);
-        let gobbling_fee =
-            if gobbling_fee >= min_gobbling_fee && tx_origin == TransactionOrigin::Foreign {
-                gobbling_fee
-            } else {
-                NativeCurrencyAmount::zero()
-            };
-        let upgrade_decision = UpgradeJob::ProofCollectionToSingleProof {
-            kernel: kernel.to_owned(),
-            proof: proof.to_owned(),
-            mutator_set: tip.mutator_set_accumulator_after().to_owned(),
-            gobbling_fee,
-        };
-
-        if upgrade_decision.mutator_set().hash() != kernel.mutator_set_hash {
+        if kernel.mutator_set_hash != tip_mutator_set.hash() {
             error!("Deprecated transaction found in mempool. Has ProofCollection in need of updating. Consider clearing mempool.");
             return None;
         }
 
-        Some((upgrade_decision, tx_origin))
+        let gobbling_fee = if tx_origin == TransactionOrigin::Own {
+            NativeCurrencyAmount::zero()
+        } else {
+            kernel.fee.lossy_f64_fraction_mul(gobbling_fraction)
+        };
+
+        let upgrade_is_worth_it =
+            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own;
+        if upgrade_is_worth_it {
+            let upgrade_job = UpgradeJob::ProofCollectionToSingleProof {
+                kernel: kernel.to_owned(),
+                proof: proof.to_owned(),
+                mutator_set: tip_mutator_set.clone(),
+                gobbling_fee,
+            };
+            Some((upgrade_job, tx_origin))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -662,32 +749,36 @@ pub(super) fn get_upgrade_task_from_mempool(
         tx_origin,
     )) = global_state.mempool.most_dense_single_proof_pair()
     {
-        let gobbling_fee = left_kernel.fee + right_kernel.fee;
-        let gobbling_fee = gobbling_fee.lossy_f64_fraction_mul(gobbling_fraction);
-        let gobbling_fee = if gobbling_fee >= min_gobbling_fee {
-            gobbling_fee
-        } else {
-            NativeCurrencyAmount::zero()
-        };
-        let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
-        let upgrade_decision = UpgradeJob::Merge {
-            left_kernel: left_kernel.to_owned(),
-            single_proof_left: left_single_proof.to_owned(),
-            right_kernel: right_kernel.to_owned(),
-            single_proof_right: right_single_proof.to_owned(),
-            shuffle_seed: rng.random(),
-            mutator_set: tip.mutator_set_accumulator_after().to_owned(),
-            gobbling_fee,
-        };
-
         if left_kernel.mutator_set_hash != right_kernel.mutator_set_hash
-            || right_kernel.mutator_set_hash != upgrade_decision.mutator_set().hash()
+            || right_kernel.mutator_set_hash != tip_mutator_set.hash()
         {
             error!("Deprecated transaction found in mempool. Has SingleProof in need of updating. Consider clearing mempool.");
             return None;
         }
 
-        Some((upgrade_decision, tx_origin))
+        let gobbling_fee = if tx_origin == TransactionOrigin::Own {
+            NativeCurrencyAmount::zero()
+        } else {
+            (left_kernel.fee + right_kernel.fee).lossy_f64_fraction_mul(gobbling_fraction)
+        };
+
+        let upgrade_is_worth_is =
+            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own;
+        if upgrade_is_worth_is {
+            let mut rng: StdRng = SeedableRng::from_seed(global_state.shuffle_seed());
+            let upgrade_decision = UpgradeJob::Merge {
+                left_kernel: left_kernel.to_owned(),
+                single_proof_left: left_single_proof.to_owned(),
+                right_kernel: right_kernel.to_owned(),
+                single_proof_right: right_single_proof.to_owned(),
+                shuffle_seed: rng.random(),
+                mutator_set: tip_mutator_set,
+                gobbling_fee,
+            };
+            Some((upgrade_decision, tx_origin))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -704,6 +795,8 @@ pub(super) fn get_upgrade_task_from_mempool(
 
 #[cfg(test)]
 mod test {
+    use tokio::sync::broadcast;
+    use tokio::sync::broadcast::error::TryRecvError;
     use tracing_test::traced_test;
 
     use super::*;
@@ -713,13 +806,21 @@ mod test {
     use crate::models::state::wallet::address::generation_address::GenerationReceivingAddress;
     use crate::models::state::wallet::transaction_output::TxOutput;
     use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
+    use crate::tests::shared::fake_block_successor_with_merged_tx;
     use crate::tests::shared::get_test_genesis_setup;
     use crate::tests::shared::invalid_empty_block_with_timestamp;
+    use crate::tests::shared::mock_genesis_global_state;
+    use crate::tests::shared::state_with_premine_and_self_mined_blocks;
+    use crate::PEER_CHANNEL_CAPACITY;
 
-    /// Returns a PrimitiveWitness-backed transaction initiated by the global
-    /// state provided as argument. Assumes balance is sufficient to make this
-    /// transaction.
-    async fn primitive_witness_backed_tx(mut state: GlobalStateLock, seed: u64) -> Transaction {
+    /// Returns a transaction initiated by the global state provided as
+    /// argument. Assumes balance is sufficient to make this transaction.
+    async fn transaction_from_state(
+        mut state: GlobalStateLock,
+        seed: u64,
+        proof_quality: TxProvingCapability,
+        fee: NativeCurrencyAmount,
+    ) -> Transaction {
         let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
         let receiving_address = GenerationReceivingAddress::derive_from_seed(rng.random());
         let tx_outputs = vec![TxOutput::onchain_native_currency(
@@ -731,7 +832,6 @@ mod test {
         .into();
         let mut state = state.lock_guard_mut().await;
         let change_key = state.wallet_state.next_unused_symmetric_key().await;
-        let fee = NativeCurrencyAmount::from_nau(100);
         let timestamp = Network::Main.launch_date() + Timestamp::months(7);
         let (tx, _, _) = state
             .create_transaction_with_prover_capability(
@@ -740,13 +840,77 @@ mod test {
                 UtxoNotificationMedium::OffChain,
                 fee,
                 timestamp,
-                TxProvingCapability::PrimitiveWitness,
+                proof_quality,
                 &TritonVmJobQueue::dummy(),
             )
             .await
             .unwrap();
 
         tx
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn dont_upgrade_foreign_proof_collection_if_fee_too_low() {
+        let network = Network::Main;
+
+        // Alice is premine recipient, so she can make a transaction (after
+        // expiry of timelock). Rando is not premine recipient.
+        let cli_args = cli_args::Args {
+            min_gobbling_fee: NativeCurrencyAmount::from_nau(5),
+            network: Network::Main,
+            ..Default::default()
+        };
+        let alice =
+            mock_genesis_global_state(network, 2, WalletEntropy::devnet_wallet(), cli_args.clone())
+                .await;
+        let pc_tx_low_fee = transaction_from_state(
+            alice.clone(),
+            512777439428,
+            TxProvingCapability::ProofCollection,
+            NativeCurrencyAmount::from_nau(2),
+        )
+        .await;
+
+        for tx_origin in [TransactionOrigin::Own, TransactionOrigin::Foreign] {
+            let mut rando = mock_genesis_global_state(
+                network,
+                2,
+                WalletEntropy::new_random(),
+                cli_args.clone(),
+            )
+            .await;
+            let mut rando = rando.lock_guard_mut().await;
+            rando.mempool_insert(pc_tx_low_fee.clone(), tx_origin).await;
+            if tx_origin == TransactionOrigin::Own {
+                assert!(get_upgrade_task_from_mempool(&rando).is_some());
+            } else {
+                assert!(get_upgrade_task_from_mempool(&rando).is_none());
+            }
+
+            // A high-fee paying transaction must be returned for upgrading
+            // regardless of origin.
+            let pc_tx_high_fee = transaction_from_state(
+                alice.clone(),
+                512777439428,
+                TxProvingCapability::ProofCollection,
+                NativeCurrencyAmount::from_nau(1_000_000_000),
+            )
+            .await;
+            rando
+                .mempool_insert(pc_tx_high_fee.clone(), TransactionOrigin::Foreign)
+                .await;
+            let job = get_upgrade_task_from_mempool(&rando).unwrap().0;
+            let UpgradeJob::ProofCollectionToSingleProof { kernel, .. } = job else {
+                panic!("Expected proof-collection to single-proof job");
+            };
+
+            assert_eq!(
+                pc_tx_high_fee.kernel.txid(),
+                kernel.txid(),
+                "Returned job must be the one with a high fee"
+            );
+        }
     }
 
     #[traced_test]
@@ -764,7 +928,13 @@ mod test {
                 get_test_genesis_setup(network, 2, cli_args::Args::default_with_network(network))
                     .await
                     .unwrap();
-            let pwtx = primitive_witness_backed_tx(alice.clone(), 512777439428).await;
+            let pwtx = transaction_from_state(
+                alice.clone(),
+                512777439428,
+                TxProvingCapability::PrimitiveWitness,
+                NativeCurrencyAmount::from_nau(100),
+            )
+            .await;
             alice
                 .lock_guard_mut()
                 .await
@@ -836,7 +1006,13 @@ mod test {
                 get_test_genesis_setup(network, 2, cli_args::Args::default_with_network(network))
                     .await
                     .unwrap();
-            let pwtx = primitive_witness_backed_tx(alice.clone(), 512777439429).await;
+            let pwtx = transaction_from_state(
+                alice.clone(),
+                512777439429,
+                TxProvingCapability::PrimitiveWitness,
+                NativeCurrencyAmount::from_nau(100),
+            )
+            .await;
             alice
                 .lock_guard_mut()
                 .await
@@ -859,7 +1035,7 @@ mod test {
                     TransactionOrigin::Own,
                     true,
                     alice.clone(),
-                    main_to_peer_tx,
+                    main_to_peer_tx.clone(),
                 )
                 .await;
 
@@ -867,6 +1043,8 @@ mod test {
             let MainToPeerTask::TransactionNotification(tx_notification) = peer_msg else {
                 panic!("Proof upgrader must inform peer tasks about upgraded tx");
             };
+
+            drop(main_to_peer_tx);
 
             assert_eq!(
                 pwtx.kernel.txid(),
@@ -906,5 +1084,86 @@ mod test {
                 .mutator_set_accumulator_after();
             assert!(mempool_tx.is_confirmable_relative_to(&mutator_set_accumulator_after));
         }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn dont_share_partly_mined_merge_upgrade() {
+        let network = Network::Main;
+
+        // Alice is premine recipient and has mined on block, so she can make
+        // (at least) two transaction.
+        let mut rng: StdRng = StdRng::seed_from_u64(512777439429);
+        let mut alice = state_with_premine_and_self_mined_blocks(network, &mut rng, 1).await;
+
+        let mut transactions = vec![];
+        for _ in 0..=1 {
+            let tx_fee = NativeCurrencyAmount::coins(2);
+            let single_proof_tx = transaction_from_state(
+                alice.clone(),
+                rng.random(),
+                TxProvingCapability::SingleProof,
+                tx_fee,
+            )
+            .await;
+            alice
+                .lock_guard_mut()
+                .await
+                .mempool_insert(single_proof_tx.clone(), TransactionOrigin::Own)
+                .await;
+            transactions.push(single_proof_tx);
+        }
+
+        let (merge_upgrade_job, _) = {
+            let alice = alice.lock_guard().await;
+            get_upgrade_task_from_mempool(&alice).unwrap()
+        };
+        assert!(
+            matches!(merge_upgrade_job, UpgradeJob::Merge { .. }),
+            "Return upgrade job must be of type merge."
+        );
+
+        // Now, one of the transactions get mined. Before the upgrade job that
+        // merges the two transactions completes. This means that the merged
+        // transaction will be a double-spending transactions as at least one
+        // of its inputs has already been spent. This transaction must not be
+        // transmitted to peers, as this would cause peers to ban the upgrader
+        // for sharing unconfirmable transactions.
+        let mined_tx = transactions[0].clone();
+        let unmined_tx = transactions[1].clone();
+        let block1 = alice.lock_guard().await.chain.light_state().to_owned();
+
+        let now = block1.header().timestamp + Timestamp::hours(1);
+        let block2 =
+            fake_block_successor_with_merged_tx(&block1, now, rng.random(), false, vec![mined_tx])
+                .await;
+        alice.set_new_tip(block2).await.unwrap();
+
+        let (main_to_peer_tx, mut main_to_peer_rx) =
+            broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
+        merge_upgrade_job
+            .handle_upgrade(
+                &TritonVmJobQueue::dummy(),
+                TransactionOrigin::Own,
+                true,
+                alice.clone(),
+                main_to_peer_tx.clone(),
+            )
+            .await;
+
+        let peer_msg = main_to_peer_rx.try_recv().unwrap_err();
+        assert_eq!(TryRecvError::Empty, peer_msg);
+
+        drop(main_to_peer_tx);
+
+        // Since one transacion got mined, and the other didn't, we should still
+        // have the unmined transaction in the mempool. Since this transcation
+        // is owned by this client, we want to keep it in the mempool.
+        assert_eq!(1, alice.lock_guard().await.mempool.len());
+        assert!(alice
+            .lock_guard()
+            .await
+            .mempool
+            .contains(unmined_tx.kernel.txid()));
     }
 }

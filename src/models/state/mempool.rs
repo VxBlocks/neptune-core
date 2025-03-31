@@ -90,6 +90,7 @@ pub enum MempoolEvent {
 /// Used to mark origin of transaction. To determine if transaction was
 /// initiated locally or not.
 #[derive(Debug, GetSize, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "arbitrary-impls"), derive(arbitrary::Arbitrary))]
 pub(crate) enum TransactionOrigin {
     Foreign,
     Own,
@@ -118,6 +119,30 @@ pub(crate) struct MempoolTransaction {
     pub(crate) origin: TransactionOrigin,
 }
 
+/// Unpersisted view of valid transactions that have not been confirmed yet.
+///
+/// Transactions can be inserted into the mempool, and a max size of the
+/// mempool can be declared, either in number of bytes, or in number of
+/// transactions allowed into the mempool.
+///
+/// The mempool uses [`TransactionKernelId`] as its main key, meaning that two
+/// transactions with the same [`TransactionKernelId`] can never be stored in
+/// the mempool. The mempool keeps a sorted view of which transactions are the
+/// most fee-paying as measured by [`FeeDensity`], thus allowing for the least
+/// valuable (from a miner's and proof upgrader's perspective) transactions to
+/// be dropped. However, the mempool always favors transactions of higher
+/// "proof-quality" such that a single-proof backed transaction will always
+/// replace a primitive-witness or proof-collection backed transaction, without
+/// considering fee densities. This is because a) single-proof backed
+/// transactions can always be synced to the latest block (assuming no
+/// reorganization has occurred), and b) because single-proof backed
+/// transactions are more likely to be picked for inclusion in the next block.
+///
+/// The mempool does not attempt to confirm validity or confirmability of its
+/// transactions, that must be handled by the caller. It does, however,
+/// guarantee that no conflicting transactions can be contained in the mempool.
+/// This means that two transactions that spend the same input will never be
+/// allowed into the mempool simultaneously.
 #[derive(Debug, GetSize)]
 pub struct Mempool {
     /// Maximum size this data structure may take up in memory.
@@ -340,9 +365,19 @@ impl Mempool {
                 TransactionProof::ProofCollection(_) => conflicts
                     .iter()
                     .any(|x| matches!(&x.1.proof, TransactionProof::Witness(_))),
-                TransactionProof::SingleProof(_) => conflicts
-                    .iter()
-                    .any(|x| !matches!(&x.1.proof, TransactionProof::SingleProof(_))),
+                TransactionProof::SingleProof(_) => {
+                    // A SingleProof-backed transaction kicks out conflicts if
+                    // a) any conflicts are not SingleProof, or
+                    // b) the conflict (as there can be only one) has the same
+                    //    txk-id, which indicates mutator set update. In this
+                    //    case, we just assume that the new transaction has a
+                    //    newer mutator set, because you cannot update back in
+                    //    time.
+                    conflicts.iter().any(|(conflicting_txkid, conflicting_tx)| {
+                        !matches!(&conflicting_tx.proof, TransactionProof::SingleProof(_))
+                            || *conflicting_txkid == new_tx.kernel.txid()
+                    })
+                }
             }
         }
 
@@ -350,18 +385,26 @@ impl Mempool {
 
         // If transaction to be inserted conflicts with transactions already in
         // the mempool, we replace them -- but only if the new transaction has a
-        // higher fee-density than the ones already in mempool. This should have
-        // the effect that merged transactions always replace those transactions
+        // higher fee-density than the ones already in mempool, or if it has
+        // a higher proof-quality, meaning that it's in a state more likely to
+        // be picked up by a composer.
+        // Consequently, merged transactions always replace those transactions
         // that were merged since the merged transaction is *very* likely to
         // have a higher fee density that the lowest one of the ones that were
-        // merged. If the new transaction has a higher proof quality than the
-        // conflict, we also replace the old transactions.
+        // merged.
         let conflicts = self.transaction_conflicts_with(&new_tx);
+
+        // do not insert an existing transaction again
+        if conflicts.contains(&(new_tx.kernel.txid(), &new_tx)) {
+            return vec![];
+        }
+
         let new_tx_has_higher_proof_quality = new_tx_has_higher_proof_quality(&new_tx, &conflicts);
         let min_fee_of_conflicts = conflicts.iter().map(|x| x.1.fee_density()).min();
         let conflicts = conflicts.into_iter().map(|x| x.0).collect_vec();
         if let Some(min_fee_of_conflicting_tx) = min_fee_of_conflicts {
-            if new_tx_has_higher_proof_quality || min_fee_of_conflicting_tx < new_tx.fee_density() {
+            let better_fee_density = min_fee_of_conflicting_tx < new_tx.fee_density();
+            if new_tx_has_higher_proof_quality || better_fee_density {
                 for conflicting_txid in conflicts {
                     if let Some(e) = self.remove(conflicting_txid) {
                         events.push(e);
@@ -454,7 +497,8 @@ impl Mempool {
 
     /// Return a vector with copies of the transactions, in descending order by fee
     /// density. Set `only_single_proofs` to true to only return transactions
-    /// that are backed by single proofs.
+    /// that are backed by single proofs. Only returns transactions with a
+    /// matching mutator set hash.
     ///
     /// Number of transactions returned can be capped by either size (measured
     /// in bytes), or by transaction count. The function guarantees that neither
@@ -464,6 +508,7 @@ impl Mempool {
         mut remaining_storage: usize,
         max_num_txs: Option<usize>,
         only_single_proofs: bool,
+        mutator_set_hash: Digest,
     ) -> Vec<Transaction> {
         let mut transactions = vec![];
         let mut fee_acc = NativeCurrencyAmount::zero();
@@ -475,14 +520,19 @@ impl Mempool {
             }
 
             if let Some(transaction_ptr) = self.get(transaction_digest) {
-                let transaction_copy = transaction_ptr.to_owned();
-                let transaction_size = transaction_copy.get_size();
+                // Only return transaction synced to expected mutator set
+                if mutator_set_hash != transaction_ptr.kernel.mutator_set_hash {
+                    continue;
+                }
 
                 if only_single_proofs
                     && !matches!(transaction_ptr.proof, TransactionProof::SingleProof(_))
                 {
                     continue;
                 }
+
+                let transaction_copy = transaction_ptr.to_owned();
+                let transaction_size = transaction_copy.get_size();
 
                 // Current transaction is too big
                 if transaction_size > remaining_storage {
@@ -809,7 +859,10 @@ mod tests {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     use proptest_arbitrary_interop::arb;
+    use rand::random;
+    use rand::rng;
     use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
     use rand::Rng;
     use rand::SeedableRng;
     use tracing_test::traced_test;
@@ -821,6 +874,7 @@ mod tests {
     use crate::mine_loop::mine_loop_tests::make_coinbase_transaction_from_state;
     use crate::models::blockchain::block::block_height::BlockHeight;
     use crate::models::blockchain::transaction::primitive_witness::PrimitiveWitness;
+    use crate::models::blockchain::transaction::transaction_kernel::TransactionKernelModifier;
     use crate::models::blockchain::transaction::validity::single_proof::SingleProof;
     use crate::models::blockchain::transaction::Transaction;
     use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
@@ -835,7 +889,8 @@ mod tests {
     use crate::models::state::TritonVmJobQueue;
     use crate::tests::shared::make_mock_block;
     use crate::tests::shared::make_mock_txs_with_primitive_witness_with_timestamp;
-    use crate::tests::shared::make_plenty_mock_transaction_with_primitive_witness;
+    use crate::tests::shared::make_plenty_mock_transaction_supported_by_invalid_single_proofs;
+    use crate::tests::shared::make_plenty_mock_transaction_supported_by_primitive_witness;
     use crate::tests::shared::mock_genesis_global_state;
 
     #[tokio::test]
@@ -844,7 +899,7 @@ mod tests {
         let genesis_block = Block::genesis(network);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
 
-        let txs = make_plenty_mock_transaction_with_primitive_witness(2);
+        let txs = make_plenty_mock_transaction_supported_by_primitive_witness(2);
         let transaction_digests = txs.iter().map(|tx| tx.kernel.txid()).collect_vec();
         assert!(!mempool.contains(transaction_digests[0]));
         assert!(!mempool.contains(transaction_digests[1]));
@@ -874,16 +929,23 @@ mod tests {
         assert!(mempool.len().is_zero());
     }
 
-    /// Create a mempool with n transactions.
+    /// Create a mempool with n transactions, all "synced" to the provided
+    /// block.
+    ///
+    /// All transactions inserted into the mempool this way are invalid and
+    /// cannot be included in any block.
     fn setup_mock_mempool(
         transactions_count: usize,
-        network: Network,
         origin: TransactionOrigin,
+        sync_block: &Block,
     ) -> Mempool {
-        let genesis_block = Block::genesis(network);
-        let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
-        let txs = make_plenty_mock_transaction_with_primitive_witness(transactions_count);
-        for tx in txs {
+        let mut mempool = Mempool::new(ByteSize::gb(1), None, sync_block.hash());
+        let txs = make_plenty_mock_transaction_supported_by_primitive_witness(transactions_count);
+        let mutator_set_hash = sync_block.mutator_set_accumulator_after().hash();
+        for mut tx in txs {
+            tx.kernel = TransactionKernelModifier::default()
+                .mutator_set_hash(mutator_set_hash)
+                .modify(tx.kernel);
             mempool.insert(tx, origin);
         }
 
@@ -893,6 +955,8 @@ mod tests {
     }
 
     /// Mocking what the caller might do with the update jobs.
+    ///
+    /// Assumes that all transactions in the mempool are valid.
     async fn mocked_mempool_update_handler(
         update_jobs: Vec<UpdateMutatorSetDataJob>,
         mempool: &mut Mempool,
@@ -925,11 +989,15 @@ mod tests {
     async fn get_densest_transactions_no_tx_cap() {
         // Verify that transactions are returned ordered by fee density, with highest fee density first
         let num_txs = 10;
-        let mempool = setup_mock_mempool(num_txs, Network::Main, TransactionOrigin::Foreign);
+        let network = Network::Main;
+        let sync_block = Block::genesis(network);
+        let mempool = setup_mock_mempool(num_txs, TransactionOrigin::Foreign, &sync_block);
+        let mutator_set_hash = sync_block.mutator_set_accumulator_after().hash();
 
         let max_fee_density: FeeDensity = FeeDensity::new(BigInt::from(u128::MAX), BigInt::from(1));
         let mut prev_fee_density = max_fee_density;
-        for curr_transaction in mempool.get_transactions_for_block(SIZE_20MB_IN_BYTES, None, false)
+        for curr_transaction in
+            mempool.get_transactions_for_block(SIZE_20MB_IN_BYTES, None, false, mutator_set_hash)
         {
             let curr_fee_density = curr_transaction.fee_density();
             assert!(curr_fee_density <= prev_fee_density);
@@ -944,13 +1012,19 @@ mod tests {
     async fn get_densest_transactions_with_tx_cap() {
         // Verify that transactions are returned ordered by fee density, with highest fee density first
         let num_txs = 12;
-        let mempool = setup_mock_mempool(num_txs, Network::Main, TransactionOrigin::Foreign);
+        let network = Network::Main;
+        let sync_block = Block::genesis(network);
+        let mempool = setup_mock_mempool(num_txs, TransactionOrigin::Foreign, &sync_block);
+        let mutator_set_hash = sync_block.mutator_set_accumulator_after().hash();
 
         let max_fee_density: FeeDensity = FeeDensity::new(BigInt::from(u128::MAX), BigInt::from(1));
         let mut prev_fee_density = max_fee_density;
-        for curr_transaction in
-            mempool.get_transactions_for_block(SIZE_20MB_IN_BYTES, Some(num_txs), false)
-        {
+        for curr_transaction in mempool.get_transactions_for_block(
+            SIZE_20MB_IN_BYTES,
+            Some(num_txs),
+            false,
+            mutator_set_hash,
+        ) {
             let curr_fee_density = curr_transaction.fee_density();
             assert!(curr_fee_density <= prev_fee_density);
             prev_fee_density = curr_fee_density;
@@ -963,7 +1037,9 @@ mod tests {
     #[tokio::test]
     async fn most_dense_proof_collection_test() {
         let network = Network::Main;
-        let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign);
+        let sync_block = Block::genesis(network);
+        let num_txs = 0;
+        let mut mempool = setup_mock_mempool(num_txs, TransactionOrigin::Foreign, &sync_block);
         let genesis_block = Block::genesis(network);
         let bob_wallet_secret = WalletEntropy::devnet_wallet();
         let bob_spending_key = bob_wallet_secret.nth_generation_spending_key_for_tests(0);
@@ -1015,7 +1091,10 @@ mod tests {
     #[tokio::test]
     async fn get_sorted_iter() {
         // Verify that the function `get_sorted_iter` returns transactions sorted by fee density
-        let mempool = setup_mock_mempool(10, Network::Main, TransactionOrigin::Foreign);
+        let network = Network::Main;
+        let sync_block = Block::genesis(network);
+        let num_txs = 10;
+        let mempool = setup_mock_mempool(num_txs, TransactionOrigin::Foreign, &sync_block);
 
         let max_fee_density: FeeDensity = FeeDensity::new(BigInt::from(u128::MAX), BigInt::from(1));
         let mut prev_fee_density = max_fee_density;
@@ -1030,14 +1109,118 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     async fn max_num_transactions_is_respected() {
+        let network = Network::Main;
+        let sync_block = Block::genesis(network);
         let num_txs = 12;
-        let mempool = setup_mock_mempool(num_txs, Network::Main, TransactionOrigin::Foreign);
+        let mempool = setup_mock_mempool(num_txs, TransactionOrigin::Foreign, &sync_block);
+        let mutator_set_hash = sync_block.mutator_set_accumulator_after().hash();
+
         for i in 0..num_txs {
             assert_eq!(
                 i,
                 mempool
-                    .get_transactions_for_block(SIZE_20MB_IN_BYTES, Some(i), false)
+                    .get_transactions_for_block(
+                        SIZE_20MB_IN_BYTES,
+                        Some(i),
+                        false,
+                        mutator_set_hash
+                    )
                     .len()
+            );
+        }
+    }
+
+    #[test]
+    fn get_transactions_for_block_filters_out_unsynced_transactions() {
+        let network = Network::Main;
+        let genesis_block = Block::genesis(network);
+        let mutator_set_hash: Digest = random();
+
+        let num_synced_transactions = 5;
+        let num_unsynced_transactions = 4;
+
+        let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
+        let mut txs = make_plenty_mock_transaction_supported_by_invalid_single_proofs(
+            num_synced_transactions + num_unsynced_transactions,
+        );
+        for tx in txs.iter_mut().take(num_synced_transactions) {
+            tx.kernel = TransactionKernelModifier::default()
+                .mutator_set_hash(mutator_set_hash)
+                .modify(tx.kernel.clone());
+        }
+
+        txs.shuffle(&mut rng());
+
+        for tx in txs {
+            mempool.insert(tx, TransactionOrigin::Foreign);
+        }
+
+        let only_return_single_proofs = true;
+        let max_total_tx_size = 1_000_000_000;
+        let txs_for_block = mempool.get_transactions_for_block(
+            max_total_tx_size,
+            None,
+            only_return_single_proofs,
+            mutator_set_hash,
+        );
+        assert_eq!(num_synced_transactions, txs_for_block.len());
+        assert!(txs_for_block
+            .iter()
+            .all(|tx| tx.kernel.mutator_set_hash == mutator_set_hash));
+        assert_eq!(
+            num_synced_transactions + num_unsynced_transactions,
+            mempool.len()
+        );
+    }
+
+    #[traced_test]
+    #[test]
+    fn only_txs_with_matching_mutator_set_hashes_are_returned_for_block_inclusion() {
+        let network = Network::Main;
+        let genesis_block = Block::genesis(network);
+        let mutator_set_hash: Digest = random();
+
+        for i in 0..5 {
+            let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
+            let mut txs = make_plenty_mock_transaction_supported_by_primitive_witness(i);
+
+            for tx in txs.clone() {
+                mempool.insert(tx, TransactionOrigin::Foreign);
+            }
+
+            let max_total_tx_size = 1_000_000_000;
+            let only_return_single_proofs = false;
+            let txs_returned = mempool.get_transactions_for_block(
+                max_total_tx_size,
+                None,
+                only_return_single_proofs,
+                mutator_set_hash,
+            );
+            assert_eq!(
+                0,
+                txs_returned.len(),
+                "Must return 0/{i} transaction when mutator set hashes don't match. Got {}/{i}",
+                txs_returned.len()
+            );
+
+            mempool.clear();
+            for tx in &mut txs {
+                tx.kernel = TransactionKernelModifier::default()
+                    .mutator_set_hash(mutator_set_hash)
+                    .modify(tx.kernel.clone());
+                mempool.insert(tx.to_owned(), TransactionOrigin::Foreign);
+            }
+            assert_eq!(
+                i,
+                mempool
+                    .get_transactions_for_block(
+                        max_total_tx_size,
+                        None,
+                        only_return_single_proofs,
+                        mutator_set_hash,
+                    )
+                    .len(),
+                "Must return {i}/{i} transaction when mutator set hashes do match"
             );
         }
     }
@@ -1087,17 +1270,32 @@ mod tests {
         let network = Network::Main;
         let bob_wallet_secret = WalletEntropy::devnet_wallet();
         let bob_spending_key = bob_wallet_secret.nth_generation_spending_key_for_tests(0);
-        let mut bob =
-            mock_genesis_global_state(network, 2, bob_wallet_secret, cli_args::Args::default())
-                .await;
+        let mut bob = mock_genesis_global_state(
+            network,
+            2,
+            bob_wallet_secret,
+            cli_args::Args {
+                guesser_fraction: 0.0,
+                ..Default::default()
+            },
+        )
+        .await;
 
         let bob_address = bob_spending_key.to_address();
 
         let alice_wallet = WalletEntropy::new_pseudorandom(rng.random());
         let alice_key = alice_wallet.nth_generation_spending_key_for_tests(0);
         let alice_address = alice_key.to_address();
-        let mut alice =
-            mock_genesis_global_state(network, 2, alice_wallet, cli_args::Args::default()).await;
+        let mut alice = mock_genesis_global_state(
+            network,
+            2,
+            alice_wallet,
+            cli_args::Args {
+                guesser_fraction: 0.0,
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Ensure that both wallets have a non-zero balance by letting Alice
         // mine a block.
@@ -1203,7 +1401,6 @@ mod tests {
         }
 
         // Create next block which includes Bob's, but not Alice's, transaction.
-        let guesser_fraction = 0f64;
         let (coinbase_transaction, _expected_utxo) = make_coinbase_transaction_from_state(
             &bob.global_state_lock
                 .lock_guard()
@@ -1212,7 +1409,6 @@ mod tests {
                 .light_state()
                 .clone(),
             &bob,
-            guesser_fraction,
             in_eight_months,
             TxProvingCapability::SingleProof,
             TritonVmJobPriority::Normal.into(),
@@ -1244,11 +1440,12 @@ mod tests {
 
         // Create a new block to verify that the non-mined transaction contains
         // updated and valid-again mutator set data
+        let block2_msa = block_2.mutator_set_accumulator_after();
         let mut tx_by_alice_updated: Transaction =
-            mempool.get_transactions_for_block(usize::MAX, None, true)[0].clone();
+            mempool.get_transactions_for_block(usize::MAX, None, true, block2_msa.hash())[0]
+                .clone();
         assert!(
-            tx_by_alice_updated
-                .is_confirmable_relative_to(&block_2.mutator_set_accumulator_after()),
+            tx_by_alice_updated.is_confirmable_relative_to(&block2_msa),
             "Block with tx with updated mutator set data must be confirmable wrt. block_2"
         );
 
@@ -1274,7 +1471,13 @@ mod tests {
             previous_block = next_block;
         }
 
-        tx_by_alice_updated = mempool.get_transactions_for_block(usize::MAX, None, true)[0].clone();
+        tx_by_alice_updated = mempool.get_transactions_for_block(
+            usize::MAX,
+            None,
+            true,
+            previous_block.mutator_set_accumulator_after().hash(),
+        )[0]
+        .clone();
         let block_5_timestamp = previous_block.header().timestamp + Timestamp::hours(1);
         let (cbtx, _eutxo) = make_coinbase_transaction_from_state(
             &alice
@@ -1285,7 +1488,6 @@ mod tests {
                 .light_state()
                 .clone(),
             &alice,
-            guesser_fraction,
             block_5_timestamp,
             TxProvingCapability::SingleProof,
             TritonVmJobPriority::Normal.into(),
@@ -1412,12 +1614,13 @@ mod tests {
 
         // Verify that `get_transactions_for_block` handles single-proof
         // argument correctly.
+        let mutator_set_hash = merged.kernel.mutator_set_hash;
         assert!(mempool
-            .get_transactions_for_block(usize::MAX, None, true)
+            .get_transactions_for_block(usize::MAX, None, true, mutator_set_hash)
             .len()
             .is_one());
         assert!(mempool
-            .get_transactions_for_block(usize::MAX, None, false)
+            .get_transactions_for_block(usize::MAX, None, false, mutator_set_hash)
             .len()
             .is_one());
     }
@@ -1506,12 +1709,13 @@ mod tests {
             mocked_mempool_update_handler(update_jobs, &mut alice.lock_guard_mut().await.mempool)
                 .await;
 
-            let mempool_txs =
-                alice
-                    .lock_guard()
-                    .await
-                    .mempool
-                    .get_transactions_for_block(usize::MAX, None, true);
+            let mutator_set_hash = next_block.mutator_set_accumulator_after().hash();
+            let mempool_txs = alice.lock_guard().await.mempool.get_transactions_for_block(
+                usize::MAX,
+                None,
+                true,
+                mutator_set_hash,
+            );
             assert_eq!(
                 1,
                 mempool_txs.len(),
@@ -1544,12 +1748,13 @@ mod tests {
 
         // Verify that all retained txs (if any) are confirmable against
         // the new tip.
+        let mutator_set_hash = block_1b.mutator_set_accumulator_after().hash();
         assert!(
             alice
                 .lock_guard()
                 .await
                 .mempool
-                .get_transactions_for_block(usize::MAX, None, false)
+                .get_transactions_for_block(usize::MAX, None, false, mutator_set_hash)
                 .iter()
                 .all(|tx| tx.is_confirmable_relative_to(&block_1b.mutator_set_accumulator_after())),
             "All retained txs in the mempool must be confirmable relative to the new block.
@@ -1669,17 +1874,14 @@ mod tests {
     async fn single_proof_flag_is_respected() {
         let network = Network::Main;
         let genesis_block = Block::genesis(network);
-        let txs = make_plenty_mock_transaction_with_primitive_witness(11);
-        let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
-        for tx in txs {
-            mempool.insert(tx, TransactionOrigin::Foreign);
-        }
+        let mempool = setup_mock_mempool(11, TransactionOrigin::Foreign, &genesis_block);
+        let mutator_set_hash = genesis_block.mutator_set_accumulator_after().hash();
 
         assert!(mempool
-            .get_transactions_for_block(usize::MAX, None, true)
+            .get_transactions_for_block(usize::MAX, None, true, mutator_set_hash)
             .is_empty());
         assert!(!mempool
-            .get_transactions_for_block(usize::MAX, None, false)
+            .get_transactions_for_block(usize::MAX, None, false, mutator_set_hash)
             .is_empty());
     }
 
@@ -1688,7 +1890,7 @@ mod tests {
     async fn max_len_none() {
         let network = Network::Main;
         let genesis_block = Block::genesis(network);
-        let txs = make_plenty_mock_transaction_with_primitive_witness(11);
+        let txs = make_plenty_mock_transaction_supported_by_primitive_witness(11);
         let mut mempool = Mempool::new(ByteSize::gb(1), None, genesis_block.hash());
 
         for tx in txs {
@@ -1707,7 +1909,7 @@ mod tests {
     async fn max_len_is_respected() {
         let network = Network::Main;
         let genesis_block = Block::genesis(network);
-        let txs = make_plenty_mock_transaction_with_primitive_witness(20);
+        let txs = make_plenty_mock_transaction_supported_by_primitive_witness(20);
 
         let mut expected_txs = txs.clone();
         expected_txs.sort_by_key(|x| x.fee_density());
@@ -1742,7 +1944,9 @@ mod tests {
         // Verify that the `get_size` method on mempool returns sane results
         let network = Network::Main;
         let tx_count_small = 2;
-        let mempool_small = setup_mock_mempool(tx_count_small, network, TransactionOrigin::Foreign);
+        let genesis_block = Block::genesis(network);
+        let mempool_small =
+            setup_mock_mempool(tx_count_small, TransactionOrigin::Foreign, &genesis_block);
         let size_gs_small = mempool_small.get_size();
         let size_serialized_small = bincode::serialize(&mempool_small.tx_dictionary)
             .unwrap()
@@ -1758,7 +1962,8 @@ mod tests {
         );
 
         let tx_count_big = 6;
-        let mempool_big = setup_mock_mempool(tx_count_big, network, TransactionOrigin::Foreign);
+        let mempool_big =
+            setup_mock_mempool(tx_count_big, TransactionOrigin::Foreign, &genesis_block);
         let size_gs_big = mempool_big.get_size();
         let size_serialized_big = bincode::serialize(&mempool_big.tx_dictionary)
             .unwrap()
@@ -1775,9 +1980,14 @@ mod tests {
     }
 
     mod proof_quality_tests {
-        use super::*;
+        use proptest::prop_assert_eq;
+        use proptest::prop_assert_ne;
+        use test_strategy::proptest;
 
-        /// Return a valid transaction with a specified proof type.
+        use super::*;
+        use crate::models::blockchain::block::mutator_set_update::MutatorSetUpdate;
+
+        /// Return a valid, deterministic transaction with a specified proof type.
         async fn tx_with_proof_type(
             proof_type: TxProvingCapability,
             network: Network,
@@ -1822,7 +2032,8 @@ mod tests {
                 NativeCurrencyAmount::coins(15),
             )
             .await;
-            let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign);
+            let genesis_block = Block::genesis(network);
+            let mut mempool = setup_mock_mempool(0, TransactionOrigin::Foreign, &genesis_block);
             mempool.insert(pw_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
@@ -1852,7 +2063,8 @@ mod tests {
                 NativeCurrencyAmount::coins(15),
             )
             .await;
-            let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign);
+            let genesis_block = Block::genesis(network);
+            let mut mempool = setup_mock_mempool(0, TransactionOrigin::Foreign, &genesis_block);
             mempool.insert(pc_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
@@ -1882,7 +2094,8 @@ mod tests {
                 NativeCurrencyAmount::coins(15),
             )
             .await;
-            let mut mempool = setup_mock_mempool(0, network, TransactionOrigin::Foreign);
+            let genesis_block = Block::genesis(network);
+            let mut mempool = setup_mock_mempool(0, TransactionOrigin::Foreign, &genesis_block);
             mempool.insert(pc_high_fee, TransactionOrigin::Own);
             assert!(mempool.len().is_one(), "One tx after insertion");
 
@@ -1900,6 +2113,63 @@ mod tests {
                 tx_in_mempool.proof,
                 TransactionProof::ProofCollection(_)
             ));
+        }
+
+        #[proptest(cases = 15, async = "tokio")]
+        async fn ms_updated_transaction_always_replaces_progenitor(
+            #[strategy(0usize..20)] _num_inputs_own: usize,
+            #[strategy(0usize..20)] _num_outputs_own: usize,
+            #[strategy(0usize..20)] _num_public_announcements_own: usize,
+            #[strategy(0usize..20)] _num_inputs_mined: usize,
+            #[strategy(0usize..20)] _num_outputs_mined: usize,
+            #[strategy(0usize..20)] _num_public_announcements_mined: usize,
+            #[strategy(0usize..200_000)] size_old_proof: usize,
+            #[strategy(0usize..200_000)] size_new_proof: usize,
+            #[strategy(arb())] tx_origin: TransactionOrigin,
+            #[strategy(PrimitiveWitness::arbitrary_tuple_with_matching_mutator_sets(
+            [(#_num_inputs_own, #_num_outputs_own, #_num_public_announcements_own),
+            (#_num_inputs_mined, #_num_outputs_mined, #_num_public_announcements_mined),],
+    ))]
+            pws: [PrimitiveWitness; 2],
+        ) {
+            // Transactions in the mempool do not need to be valid, so we just
+            // pretend that the primitive-witness backed transactions have a
+            // SingleProof.
+            let into_single_proof_transaction = |pw: PrimitiveWitness, size_of_proof: usize| {
+                let mock_proof = TransactionProof::invalid_single_proof_of_size(size_of_proof);
+                Transaction {
+                    kernel: pw.kernel,
+                    proof: mock_proof,
+                }
+            };
+            let [mempool_tx, mined_tx] = pws;
+
+            let ms_update = MutatorSetUpdate::new(
+                mined_tx.kernel.inputs.clone(),
+                mined_tx.kernel.outputs.clone(),
+            );
+            let updated_tx =
+                PrimitiveWitness::update_with_new_ms_data(mempool_tx.clone(), ms_update);
+
+            let original_tx = into_single_proof_transaction(mempool_tx, size_old_proof);
+            let updated_tx = into_single_proof_transaction(updated_tx, size_new_proof);
+
+            assert_eq!(original_tx.kernel.txid(), updated_tx.kernel.txid());
+            let txid = original_tx.kernel.txid();
+
+            let mut mempool = Mempool::new(ByteSize::gb(1), None, Digest::default());
+
+            // First insert original transaction, then updated which should
+            // always replace the original transaction, regardless of its size.
+            mempool.insert(original_tx.clone(), tx_origin);
+            let in_mempool_start = mempool.get(txid).map(|tx| tx.to_owned()).unwrap();
+            prop_assert_eq!(&original_tx, &in_mempool_start);
+            prop_assert_ne!(&updated_tx, &in_mempool_start);
+
+            mempool.insert(updated_tx.clone(), tx_origin);
+            let in_mempool_end = mempool.get(txid).map(|tx| tx.to_owned()).unwrap();
+            prop_assert_eq!(&updated_tx, &in_mempool_end);
+            prop_assert_ne!(&original_tx, &in_mempool_end);
         }
     }
 }

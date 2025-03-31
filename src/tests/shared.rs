@@ -47,6 +47,7 @@ use twenty_first::util_types::mmr::mmr_trait::Mmr;
 
 use crate::config_models::cli_args;
 use crate::config_models::data_directory::DataDirectory;
+use crate::config_models::fee_notification_policy::FeeNotificationPolicy;
 use crate::config_models::network::Network;
 use crate::database::storage::storage_vec::traits::StorageVecBase;
 use crate::database::NeptuneLevelDb;
@@ -242,7 +243,7 @@ pub(crate) async fn mock_genesis_global_state(
         genesis_block.hash(),
     );
 
-    let wallet_state = mock_genesis_wallet_state(wallet, network).await;
+    let wallet_state = mock_genesis_wallet_state(wallet, network, &cli).await;
 
     GlobalStateLock::new(
         wallet_state,
@@ -251,6 +252,43 @@ pub(crate) async fn mock_genesis_global_state(
         cli.clone(),
         mempool,
     )
+}
+
+/// A state with a premine UTXO and self-mined blocks. Both composing and
+/// guessing was done by the returned entity. Tip has height of
+/// `num_blocks_mined`.
+pub(crate) async fn state_with_premine_and_self_mined_blocks<T: RngCore>(
+    network: Network,
+    rng: &mut T,
+    num_blocks_mined: usize,
+) -> GlobalStateLock {
+    let wallet = WalletEntropy::devnet_wallet();
+    let own_key = wallet.nth_generation_spending_key_for_tests(0);
+    let mut global_state_lock =
+        mock_genesis_global_state(network, 2, wallet.clone(), cli_args::Args::default()).await;
+    let mut previous_block = Block::genesis(network);
+
+    for _ in 0..num_blocks_mined {
+        let guesser_preimage = wallet.guesser_preimage(previous_block.hash());
+        let (next_block, composer_utxos) = make_mock_block_guesser_preimage_and_guesser_fraction(
+            &previous_block,
+            None,
+            own_key,
+            rng.random(),
+            0.5,
+            guesser_preimage,
+        )
+        .await;
+
+        global_state_lock
+            .set_new_self_composed_tip(next_block.clone(), composer_utxos)
+            .await
+            .unwrap();
+
+        previous_block = next_block;
+    }
+
+    global_state_lock
 }
 
 /// Return a setup with empty databases, and with the genesis block set as tip.
@@ -487,7 +525,18 @@ pub(crate) fn make_mock_txs_with_primitive_witness_with_timestamp(
         .collect_vec()
 }
 
-pub(crate) fn make_plenty_mock_transaction_with_primitive_witness(
+pub(crate) fn make_plenty_mock_transaction_supported_by_invalid_single_proofs(
+    count: usize,
+) -> Vec<Transaction> {
+    let mut pw_backeds = make_plenty_mock_transaction_supported_by_primitive_witness(count);
+    for pw_backed in &mut pw_backeds {
+        pw_backed.proof = TransactionProof::invalid();
+    }
+
+    pw_backeds
+}
+
+pub(crate) fn make_plenty_mock_transaction_supported_by_primitive_witness(
     count: usize,
 ) -> Vec<Transaction> {
     let mut test_runner = TestRunner::deterministic();
@@ -510,6 +559,13 @@ pub(crate) fn make_plenty_mock_transaction_with_primitive_witness(
             proof: TransactionProof::Witness(pw),
         })
         .collect_vec()
+}
+
+/// A SingleProof-backed transaction with no inputs or outputs
+pub(crate) fn invalid_empty_single_proof_transaction() -> Transaction {
+    let tx = make_mock_transaction(vec![], vec![]);
+    assert!(matches!(tx.proof, TransactionProof::SingleProof(_)));
+    tx
 }
 
 /// Make a transaction with `Invalid` transaction proof.
@@ -711,7 +767,9 @@ pub(crate) async fn make_mock_block_guesser_preimage_and_guesser_fraction(
     let composer_parameters = ComposerParameters::new(
         composer_key.to_address().into(),
         coinbase_sender_randomness,
+        Some(composer_key.privacy_preimage()),
         guesser_fraction,
+        FeeNotificationPolicy::OffChain,
     );
 
     let (tx, composer_txos) = make_coinbase_transaction_stateless(
@@ -767,24 +825,20 @@ pub(crate) async fn make_mock_block(
 /// Return a dummy-wallet used for testing. The returned wallet is populated with
 /// whatever UTXOs are present in the genesis block.
 pub async fn mock_genesis_wallet_state(
-    wallet_secret: WalletEntropy,
+    wallet_entropy: WalletEntropy,
     network: Network,
+    cli_args: &cli_args::Args,
 ) -> WalletState {
     let data_dir = unit_test_data_directory(network).unwrap();
-    mock_genesis_wallet_state_with_data_dir(wallet_secret, network, &data_dir).await
+    mock_genesis_wallet_state_with_data_dir(wallet_entropy, &data_dir, cli_args).await
 }
 
 pub async fn mock_genesis_wallet_state_with_data_dir(
     wallet_entropy: WalletEntropy,
-    network: Network,
     data_dir: &DataDirectory,
+    cli_args: &cli_args::Args,
 ) -> WalletState {
-    let cli_args: cli_args::Args = cli_args::Args {
-        number_of_mps_per_utxo: 30,
-        network,
-        ..Default::default()
-    };
-    WalletState::new_from_wallet_entropy(data_dir, wallet_entropy, &cli_args).await
+    WalletState::new_from_wallet_entropy(data_dir, wallet_entropy, cli_args).await
 }
 
 /// Return an archival state populated with the genesis block
@@ -1003,19 +1057,31 @@ async fn fake_block_successor(
     seed: [u8; 32],
     with_valid_pow: bool,
 ) -> Block {
+    fake_block_successor_with_merged_tx(predecessor, timestamp, seed, with_valid_pow, vec![]).await
+}
+
+pub async fn fake_block_successor_with_merged_tx(
+    predecessor: &Block,
+    timestamp: Timestamp,
+    seed: [u8; 32],
+    with_valid_pow: bool,
+    txs: Vec<Transaction>,
+) -> Block {
     let mut rng = StdRng::from_seed(seed);
 
     let composer_parameters = ComposerParameters::new(
         GenerationReceivingAddress::derive_from_seed(rng.random()).into(),
         rng.random(),
+        None,
         0.5f64,
+        FeeNotificationPolicy::OffChain,
     );
     let (block_tx, _) = fake_create_block_transaction_for_tests(
         predecessor,
         composer_parameters,
         timestamp,
         rng.random(),
-        vec![],
+        txs,
     )
     .await
     .unwrap();

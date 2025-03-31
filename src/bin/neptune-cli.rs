@@ -329,6 +329,10 @@ enum Command {
         fee: NativeCurrencyAmount,
     },
 
+    /// Sends a command to the client to delete all transactions from the
+    /// mempool.
+    ClearMempool,
+
     /// pause mining
     PauseMiner,
 
@@ -1156,6 +1160,10 @@ async fn main() -> Result<()> {
                 Err(e) => eprintln!("{}", e),
             }
         }
+        Command::ClearMempool => {
+            println!("Sending command to delete all commands from the mempool.");
+            client.clear_mempool(ctx, token).await??;
+        }
         Command::PauseMiner => {
             println!("Sending command to pause miner.");
             client.pause_miner(ctx, token).await??;
@@ -1166,6 +1174,7 @@ async fn main() -> Result<()> {
             client.restart_miner(ctx, token).await??;
             println!("Command completed successfully");
         }
+
         Command::PruneAbandonedMonitoredUtxos => {
             let prunt_res_count = client.prune_abandoned_monitored_utxos(ctx, token).await??;
             println!("{prunt_res_count} monitored UTXOs marked as abandoned");

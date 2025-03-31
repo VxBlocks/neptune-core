@@ -846,15 +846,16 @@ impl PeerLoopHandler {
                 Ok(KEEP_CONNECTION_ALIVE)
             }
             PeerMessage::BlockRequestByHash(block_digest) => {
-                match self
+                let block = self
                     .global_state_lock
                     .lock_guard()
                     .await
                     .chain
                     .archival_state()
                     .get_block(block_digest)
-                    .await?
-                {
+                    .await?;
+
+                match block {
                     None => {
                         // TODO: Consider punishing here
                         warn!("Peer requested unknown block with hash {}", block_digest);
@@ -1426,20 +1427,21 @@ impl PeerLoopHandler {
                 Ok(KEEP_CONNECTION_ALIVE)
             }
             PeerMessage::TransactionRequest(transaction_identifier) => {
-                if let Some(transaction) = self
-                    .global_state_lock
-                    .lock_guard()
-                    .await
-                    .mempool
-                    .get(transaction_identifier)
-                {
-                    if let Ok(transfer_transaction) = transaction.try_into() {
-                        peer.send(PeerMessage::Transaction(Box::new(transfer_transaction)))
-                            .await?;
-                    } else {
-                        warn!("Peer requested transaction that cannot be converted to transfer object");
-                    }
-                }
+                let state = self.global_state_lock.lock_guard().await;
+                let Some(transaction) = state.mempool.get(transaction_identifier) else {
+                    return Ok(KEEP_CONNECTION_ALIVE);
+                };
+
+                let Ok(transfer_transaction) = transaction.try_into() else {
+                    warn!("Peer requested transaction that cannot be converted to transfer object");
+                    return Ok(KEEP_CONNECTION_ALIVE);
+                };
+
+                // Drop state immediately to prevent holding over a response.
+                drop(state);
+
+                peer.send(PeerMessage::Transaction(Box::new(transfer_transaction)))
+                    .await?;
 
                 Ok(KEEP_CONNECTION_ALIVE)
             }
@@ -1784,9 +1786,11 @@ impl PeerLoopHandler {
         const TIME_DIFFERENCE_WARN_THRESHOLD_IN_SECONDS: i128 = 120;
 
         let cli_args = self.global_state_lock.cli().clone();
-        let global_state = self.global_state_lock.lock_guard().await;
 
-        let standing = global_state
+        let standing = self
+            .global_state_lock
+            .lock_guard()
+            .await
             .net
             .peer_databases
             .peer_standings
@@ -1825,33 +1829,35 @@ impl PeerLoopHandler {
                 own_datetime_utc.format("%Y-%m-%d %H:%M:%S"));
         }
 
-        // There is potential for a race-condition in the peer_map here, as we've previously
-        // counted the number of entries and checked if instance ID was already connected. But
-        // this check could have been invalidated by other tasks so we perform it again
-
-        if global_state
-            .net
-            .peer_map
-            .values()
-            .any(|pi| pi.instance_id() == self.peer_handshake_data.instance_id)
+        // Multiple tasks might attempt to set up a connection concurrently. So
+        // even though we've checked that this connection is allowed, this check
+        // could have been invalidated by another task, for one accepting an
+        // incoming connection from a peer we're currently connecting to. So we
+        // need to make the a check again while holding a write-lock, since
+        // we're modifying `peer_map` here. Holding a read-lock doesn't work
+        // since it would have to be dropped before acquiring the write-lock.
         {
-            bail!("Attempted to connect to already connected peer. Aborting connection.");
-        }
+            let mut global_state = self.global_state_lock.lock_guard_mut().await;
+            let peer_map = &mut global_state.net.peer_map;
+            if peer_map
+                .values()
+                .any(|pi| pi.instance_id() == self.peer_handshake_data.instance_id)
+            {
+                bail!("Attempted to connect to already connected peer. Aborting connection.");
+            }
 
-        if global_state.net.peer_map.len() >= cli_args.max_num_peers {
-            bail!("Attempted to connect to more peers than allowed. Aborting connection.");
-        }
+            if peer_map.len() >= cli_args.max_num_peers {
+                bail!("Attempted to connect to more peers than allowed. Aborting connection.");
+            }
 
-        if global_state.net.peer_map.contains_key(&self.peer_address) {
-            // This shouldn't be possible, unless the peer reports a different instance ID than
-            // for the other connection. Only a malignant client would do that.
-            bail!("Already connected to peer. Aborting connection");
-        }
-        drop(global_state);
+            if peer_map.contains_key(&self.peer_address) {
+                // This shouldn't be possible, unless the peer reports a different instance ID than
+                // for the other connection. Only a malignant client would do that.
+                bail!("Already connected to peer. Aborting connection");
+            }
 
-        self.global_state_lock
-            .lock_mut(|s| s.net.peer_map.insert(self.peer_address, new_peer))
-            .await;
+            peer_map.insert(self.peer_address, new_peer);
+        }
 
         // `MutablePeerState` contains the part of the peer-loop's state that is mutable
         let mut peer_state = MutablePeerState::new(self.peer_handshake_data.tip_header.height);
@@ -1934,6 +1940,7 @@ mod peer_loop_tests {
     use crate::tests::shared::get_dummy_peer_connection_data_genesis;
     use crate::tests::shared::get_dummy_socket_address;
     use crate::tests::shared::get_test_genesis_setup;
+    use crate::tests::shared::invalid_empty_single_proof_transaction;
     use crate::tests::shared::Action;
     use crate::tests::shared::Mock;
 
@@ -3311,6 +3318,59 @@ mod peer_loop_tests {
         );
 
         Ok(())
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn receive_transaction_request() {
+        let network = Network::Main;
+        let dummy_tx = invalid_empty_single_proof_transaction();
+        let txid = dummy_tx.kernel.txid();
+
+        for transaction_is_known in [false, true] {
+            let (_peer_broadcast_tx, from_main_rx, to_main_tx, _, mut state_lock, _hsd) =
+                get_test_genesis_setup(network, 1, cli_args::Args::default())
+                    .await
+                    .unwrap();
+            if transaction_is_known {
+                state_lock
+                    .lock_guard_mut()
+                    .await
+                    .mempool_insert(dummy_tx.clone(), TransactionOrigin::Own)
+                    .await;
+            }
+
+            let mock = if transaction_is_known {
+                Mock::new(vec![
+                    Action::Read(PeerMessage::TransactionRequest(txid)),
+                    Action::Write(PeerMessage::Transaction(Box::new(
+                        (&dummy_tx).try_into().unwrap(),
+                    ))),
+                    Action::Read(PeerMessage::Bye),
+                ])
+            } else {
+                Mock::new(vec![
+                    Action::Read(PeerMessage::TransactionRequest(txid)),
+                    Action::Read(PeerMessage::Bye),
+                ])
+            };
+
+            let hsd = get_dummy_handshake_data_for_genesis(network);
+            let mut peer_state = MutablePeerState::new(hsd.tip_header.height);
+            let mut peer_loop_handler = PeerLoopHandler::new(
+                to_main_tx,
+                state_lock,
+                get_dummy_socket_address(0),
+                hsd,
+                true,
+                1,
+            );
+
+            peer_loop_handler
+                .run(mock, from_main_rx, &mut peer_state)
+                .await
+                .unwrap();
+        }
     }
 
     #[traced_test]
