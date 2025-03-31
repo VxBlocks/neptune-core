@@ -1423,8 +1423,8 @@ impl MainLoopHandler {
         let mut mp_resync_interval = time::interval(MP_RESYNC_INTERVAL);
         mp_resync_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // let mut tx_proof_upgrade_interval = time::interval(TRANSACTION_UPGRADE_CHECK_INTERVAL);
-        // tx_proof_upgrade_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut tx_proof_upgrade_interval = time::interval(TRANSACTION_UPGRADE_CHECK_INTERVAL);
+        tx_proof_upgrade_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         // Spawn tasks to monitor for SIGTERM, SIGINT, and SIGQUIT. These
         // signals are only used on Unix systems.
@@ -1619,12 +1619,12 @@ impl MainLoopHandler {
                 }
 
                 // run the proof upgrader
-                // _ = tx_proof_upgrade_interval.tick() => {
-                //     log_slow_scope!(fn_name!() + "::select::tx_proof_upgrade_interval");
+                _ = tx_proof_upgrade_interval.tick() => {
+                    log_slow_scope!(fn_name!() + "::select::tx_proof_upgrade_interval");
 
-                //     trace!("Timer: tx-proof-upgrader");
-                //     self.proof_upgrader(&mut main_loop_state).await?;
-                // }
+                    trace!("Timer: tx-proof-upgrader");
+                    self.proof_upgrader(&mut main_loop_state).await?;
+                }
 
             }
         };
