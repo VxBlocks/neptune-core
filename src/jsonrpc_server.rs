@@ -94,6 +94,10 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/tx/broadcast",
                 axum::routing::post(broadcast_transaction),
+            )
+            .route(
+                "/rpc/getnonces/{count}",
+                axum::routing::get(getnonces),
             );
 
         routes
@@ -287,6 +291,37 @@ async fn get_blocks_time(
     }
 
     Ok(ErasedJson::pretty(block_time_list))
+}
+
+async fn getnonces(
+    State(rpcstate): State<NeptuneRPCServer>,
+    Path(count): Path<u64>,
+) -> Result<ErasedJson, RestError> {
+    let state = rpcstate.state.lock_guard().await;
+    let end: u64 = state.chain.archival_state().get_tip().await.header().height.into();
+    let start = end - count + 1;
+
+    let mut block_time_list = Vec::with_capacity((end - start + 1) as usize);
+    let mut count = 0;
+    for cur_height in start..=end {
+        let block_selector = BlockSelector::Height(cur_height.into());
+        let Some(digest) = block_selector.as_digest(&state).await else {
+            break;
+        };
+        let archival_state = state.chain.archival_state();
+        let Some(block) = archival_state.get_block(digest).await? else {
+            break;
+        };
+
+        block_time_list.push(block.header().nonce.to_hex());
+        if block.header().nonce.to_hex().starts_with("0000000000000000") {
+            count += 1;
+        }
+    }
+
+    let aaa = (format!("block ({}-{}), {}/{} = {}%",start,end, count, end - start + 1, (count*100) / (end - start + 1)),  block_time_list);
+
+    Ok(ErasedJson::pretty(aaa))
 }
 
 #[derive(Debug, Serialize, Clone)]
