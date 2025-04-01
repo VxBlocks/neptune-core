@@ -352,9 +352,8 @@ struct SimpleBlock {
     height: u64,
     hash: String,
     fee: String,
-    timestamp: u64
+    timestamp: u64,
 }
-
 
 async fn get_last_blocks(
     State(rpcstate): State<NeptuneRPCServer>,

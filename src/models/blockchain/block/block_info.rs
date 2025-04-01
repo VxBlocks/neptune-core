@@ -39,9 +39,9 @@ pub struct BlockInfo {
     pub is_genesis: bool,
     pub is_tip: bool,
     pub is_canonical: bool,
-    pub sibling_blocks: Vec<Digest>, // blocks at same height
-    // pub block_kernel2: BlockKernel,
+    pub sibling_blocks: Vec<Digest>,
     pub txid: TransactionKernelId,
+    pub guesser_digest: Digest,
 }
 
 // note: this is used by neptune-cli block-info command.
@@ -76,13 +76,13 @@ impl std::fmt::Display for BlockInfo {
                 "sibling_blocks: {}\n",
                 self.sibling_blocks.iter().map(|d| d.to_hex()).join(",")
             )
-            // + &format!(
-            //     "block_kernel2: {:?}\n",
-            //     self.block_kernel2
-            // )
             + &format!(
                 "txid: {:?}\n",
                 self.txid,
+            )
+            + &format!(
+                "guesser_digest: {}\n",
+                self.guesser_digest.to_hex()
             );
 
         write!(f, "{}", buf)
@@ -130,8 +130,8 @@ impl BlockInfo {
             is_tip: digest == tip_digest,
             is_canonical,
             sibling_blocks,
-            // block_kernel2: block.kernel.clone(),
             txid: block.kernel.body.transaction_kernel.txid(),
+            guesser_digest: block.header().guesser_digest,
         }
     }
 
