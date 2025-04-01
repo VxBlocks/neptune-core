@@ -88,10 +88,6 @@ pub(crate) async fn run_rpc_server(
                 axum::routing::get(get_blocks_time),
             )
             .route(
-                "/rpc/guess_reward/{start}/{end}",
-                axum::routing::get(get_guess_reward),
-            )
-            .route(
                 "/rpc/tx/broadcast",
                 axum::routing::post(broadcast_transaction),
             )
@@ -99,6 +95,10 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/getlastblocks/{count}",
                 axum::routing::get(get_last_blocks),
+            )
+            .route(
+                "/rpc/owner_blocks/{start}/{end}",
+                axum::routing::get(get_owner_blocks),
             );
 
         routes
@@ -392,6 +392,51 @@ async fn get_last_blocks(
     Ok(ErasedJson::pretty(block_time_list))
 }
 
+async fn get_owner_blocks(
+    State(rpcstate): State<NeptuneRPCServer>,
+    Path((start, end)): Path<(u64, u64)>,
+) -> Result<ErasedJson, RestError> {
+    let state = rpcstate.state.lock_guard().await;
+
+    let mut owner_block_list = Vec::new();
+    let mut reward = NativeCurrencyAmount::zero();
+    for cur_height in start..=end {
+        let block_selector = BlockSelector::Height(cur_height.into());
+        let Some(digest) = block_selector.as_digest(&state).await else {
+            break;
+        };
+        let archival_state = state.chain.archival_state();
+        let Some(block) = archival_state.get_block(digest).await? else {
+            break;
+        };
+
+        let guesser_digest = state
+            .wallet_state
+            .wallet_entropy
+            .guesser_spending_key(block.header().prev_block_digest)
+            .after_image();
+
+        if guesser_digest == block.header().guesser_digest {
+            reward = reward + block.body().transaction_kernel.fee;
+            owner_block_list.push(RewardCard {
+                block_id:  block.hash(),
+                block_height: block.header().height,
+                timestamp: block.header().timestamp,
+                amount: block.body().transaction_kernel.fee.to_string(),
+            });
+        }
+    }
+
+    let guess_reward = GuessReward {
+        start: start.into(),
+        end: end.into(),
+        reward: reward.to_string(),
+        records: owner_block_list,
+    };
+
+    Ok(ErasedJson::pretty(guess_reward))
+}
+
 #[derive(Debug, Serialize, Clone)]
 struct GuessReward {
     start: BlockHeight,
@@ -406,45 +451,6 @@ struct RewardCard {
     block_height: BlockHeight,
     timestamp: Timestamp,
     amount: String,
-}
-async fn get_guess_reward(
-    State(rpcstate): State<NeptuneRPCServer>,
-    Path((start, end)): Path<(u64, u64)>,
-) -> Result<ErasedJson, RestError> {
-    let mut block_time_list = Vec::with_capacity((end - start + 1) as usize);
-    let global_state = rpcstate.state.lock_guard().await;
-
-    let history = global_state.get_guess_balance_history().await;
-
-    // sort
-    let mut display_history: Vec<(Digest, BlockHeight, Timestamp, NativeCurrencyAmount)> = history
-        .iter()
-        .map(|(h, t, bh, a)| (*h, *bh, *t, *a))
-        .collect::<Vec<_>>();
-    display_history.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-    let mut reward = NativeCurrencyAmount::zero();
-    for (h, t, bh, a) in display_history {
-        if t < start.into() || t > end.into() {
-            continue;
-        }
-        reward = reward + a;
-        block_time_list.push(RewardCard {
-            block_id: h,
-            block_height: t,
-            timestamp: bh,
-            amount: a.to_string(),
-        })
-    }
-
-    let guess_reward = GuessReward {
-        start: start.into(),
-        end: end.into(),
-        reward: reward.to_string(),
-        records: block_time_list,
-    };
-
-    Ok(ErasedJson::pretty(guess_reward))
 }
 
 async fn broadcast_transaction(
