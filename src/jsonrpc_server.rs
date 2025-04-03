@@ -125,11 +125,11 @@ async fn get_block(
     let block_selector = BlockSelector::from(block_selector);
     let state = rpcstate.state.lock_guard().await;
     let Some(digest) = block_selector.as_digest(&state).await else {
-        return Err(RestError("block not found".to_owned()));
+        return Ok(ErasedJson::pretty(Option::<crate::Block>::None));
     };
     let archival_state = state.chain.archival_state();
     let Some(block) = archival_state.get_block(digest).await? else {
-        return Err(RestError("block not found".to_owned()));
+        return Ok(ErasedJson::pretty(Option::<crate::Block>::None));
     };
 
     Ok(ErasedJson::pretty(block.block_with_invalid_proof()))
