@@ -27,7 +27,7 @@ pub const WALLET_OUTPUT_COUNT_DB_NAME: &str = "wallout_output_count_db";
 /// Wrapper around [`WalletFile`] with extra context.
 #[derive(Debug, Clone)]
 pub struct WalletFileContext {
-    pub(crate) wallet_file: WalletFile,
+    pub wallet_file: WalletFile,
 
     pub wallet_secret_path: PathBuf,
     pub incoming_randomness_file: PathBuf,
@@ -41,11 +41,11 @@ impl WalletFileContext {
         wallet_directory_path.join(WALLET_SECRET_FILE_NAME)
     }
 
-    fn wallet_outgoing_secrets_path(wallet_directory_path: &Path) -> PathBuf {
+    pub fn wallet_outgoing_secrets_path(wallet_directory_path: &Path) -> PathBuf {
         wallet_directory_path.join(WALLET_OUTGOING_SECRETS_FILE_NAME)
     }
 
-    fn wallet_incoming_secrets_path(wallet_directory_path: &Path) -> PathBuf {
+    pub fn wallet_incoming_secrets_path(wallet_directory_path: &Path) -> PathBuf {
         wallet_directory_path.join(WALLET_INCOMING_SECRETS_FILE_NAME)
     }
 
@@ -155,7 +155,7 @@ impl WalletFile {
         }
     }
 
-    fn new_random() -> Self {
+    pub fn new_random() -> Self {
         Self::new(SecretKeyMaterial(rng().random()))
     }
 
@@ -177,7 +177,7 @@ impl WalletFile {
     }
 
     /// Used to generate both the file for incoming and outgoing randomness
-    fn create_empty_wallet_randomness_file(file_path: &Path) -> Result<()> {
+    pub fn create_empty_wallet_randomness_file(file_path: &Path) -> Result<()> {
         let init_value: String = String::default();
 
         #[cfg(unix)]
