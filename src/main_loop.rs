@@ -1728,6 +1728,11 @@ impl MainLoopHandler {
                 }
                 Ok(false)
             }
+            RPCServerToMain::BroadcastNotification(n) => {
+                self.main_to_peer_broadcast_tx
+                    .send(MainToPeerTask::TransactionNotification(n));
+                Ok(false)
+            }
             RPCServerToMain::ClearMempool => {
                 info!("Clearing mempool");
                 self.global_state_lock

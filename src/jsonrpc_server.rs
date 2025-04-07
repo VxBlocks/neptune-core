@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::models::blockchain::transaction::Transaction;
+use crate::models::peer::transaction_notification::TransactionNotification;
 use crate::models::proof_abstractions::timestamp::Timestamp;
+use crate::models::state::mempool::TransactionOrigin;
 use crate::RPCServerToMain;
 use axum::extract::{Path, State};
 use axum::Json;
@@ -14,7 +16,7 @@ use axum_extra::response::ErasedJson;
 use block_selector::BlockSelectorExtended;
 use itertools::Itertools;
 use num_traits::Zero;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tasm_lib::prelude::Digest;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -419,7 +421,7 @@ async fn get_owner_blocks(
         if guesser_digest == block.header().guesser_digest {
             reward = reward + block.body().transaction_kernel.fee;
             owner_block_list.push(RewardCard {
-                block_id:  block.hash(),
+                block_id: block.hash(),
                 block_height: block.header().height,
                 timestamp: block.header().timestamp,
                 amount: block.body().transaction_kernel.fee.to_string(),
@@ -453,22 +455,23 @@ struct RewardCard {
     amount: String,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct BroadcastTx {
+    transaction: Transaction,
+    origin: TransactionOrigin,
+    notification: TransactionNotification,
+}
 async fn broadcast_transaction(
-    State(rpcstate): State<NeptuneRPCServer>,
-    Json(tx): Json<Transaction>,
+    State(mut rpcstate): State<NeptuneRPCServer>,
+    Json(tx): Json<BroadcastTx>,
 ) -> Result<ErasedJson, RestError> {
-    // Send transaction message to main
-    let response = rpcstate
-        .rpc_server_to_main_tx
-        .send(RPCServerToMain::BroadcastTx(Box::new(tx.clone())))
-        .await;
+    let tx_id = tx.transaction.kernel.txid();
+    let mut state = rpcstate.state.lock_guard_mut().await;
+    state.mempool_insert(tx.transaction, tx.origin).await;
+    let _ = rpcstate.rpc_server_to_main_tx.send(RPCServerToMain::BroadcastNotification(tx.notification)).await;
+    
 
-    if let Err(e) = response {
-        tracing::error!("Could not send Tx to main task: error: {}", e.to_string());
-        return Err(RestError("Could not send Tx to main task".to_string()));
-    };
-
-    Ok(ErasedJson::pretty(tx.kernel))
+    Ok(ErasedJson::pretty(tx_id.to_string()))
 }
 
 mod block_selector {

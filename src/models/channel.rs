@@ -206,6 +206,7 @@ pub(crate) struct ClaimUtxoData {
 pub(crate) enum RPCServerToMain {
     BroadcastTx(Box<Transaction>),
     BroadcastMempoolTransactions,
+    BroadcastNotification(TransactionNotification),
     ClearMempool,
     ProofOfWorkSolution(Box<Block>),
     PeerConnected(SocketAddr),
