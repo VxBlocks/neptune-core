@@ -153,7 +153,7 @@ impl WalletEntropy {
     }
 
     /// Return a seed used to randomize shuffling.
-    pub(crate) fn shuffle_seed(&self, block_height: BlockHeight) -> [u8; 32] {
+    pub fn shuffle_seed(&self, block_height: BlockHeight) -> [u8; 32] {
         let secure_seed_from_wallet = self.deterministic_derived_seed(block_height);
         let seed: [u8; Digest::BYTES] = secure_seed_from_wallet.into();
 

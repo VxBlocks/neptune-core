@@ -48,7 +48,7 @@ pub struct ProofCollection {
 
 impl ProofCollection {
     /// Get the total number of proofs in this collection
-    pub(crate) fn num_proofs(&self) -> usize {
+    pub fn num_proofs(&self) -> usize {
         1 + // removal_records_integrity
         1 + // collect_lock_scripts
         self.lock_scripts_halt.len() + // lock_scripts_halt

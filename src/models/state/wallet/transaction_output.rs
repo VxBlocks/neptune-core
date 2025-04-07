@@ -410,7 +410,7 @@ impl TxOutputList {
     ///
     /// Panics if the receiver preimage does not match the receiver digest from
     /// any transaction output.
-    pub(crate) fn expected_utxos(
+    pub fn expected_utxos(
         &self,
         utxo_notifier: UtxoNotifier,
         receiver_preimage: Digest,

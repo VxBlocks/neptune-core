@@ -1060,7 +1060,7 @@ impl Block {
     /// Return the mutator set update corresponding to this block, which sends
     /// the mutator set accumulator after the predecessor to the mutator set
     /// accumulator after self.
-    pub(crate) fn mutator_set_update(&self) -> MutatorSetUpdate {
+    pub fn mutator_set_update(&self) -> MutatorSetUpdate {
         let mut mutator_set_update = MutatorSetUpdate::new(
             self.body().transaction_kernel.inputs.clone(),
             self.body().transaction_kernel.outputs.clone(),
