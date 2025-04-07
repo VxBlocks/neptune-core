@@ -109,7 +109,7 @@ pub(crate) async fn run_rpc_server(
             .with_state(rpcstate)
             // Enable tower-http tracing.
             .layer(TraceLayer::new_for_http())
-            .layer(RequestBodyLimitLayer::new(10 * 1000 * 1000))
+            .layer(RequestBodyLimitLayer::new(20 * 1000 * 1000))
             // Enable CORS.
             .layer(cors)
     };
