@@ -91,7 +91,7 @@ pub enum MempoolEvent {
 /// initiated locally or not.
 #[derive(Debug, GetSize, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(arbitrary::Arbitrary))]
-pub enum TransactionOrigin {
+pub(crate) enum TransactionOrigin {
     Foreign,
     Own,
 }

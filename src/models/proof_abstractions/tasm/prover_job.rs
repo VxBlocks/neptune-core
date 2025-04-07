@@ -123,8 +123,8 @@ impl From<ProverJobError> for ProverJobResult {
 }
 
 #[derive(Debug, Clone, Default, Copy)]
-pub struct ProverJobSettings {
-    pub max_log2_padded_height_for_proofs: Option<u8>,
+pub(crate) struct ProverJobSettings {
+    pub(crate) max_log2_padded_height_for_proofs: Option<u8>,
 }
 
 #[derive(Debug, Clone)]

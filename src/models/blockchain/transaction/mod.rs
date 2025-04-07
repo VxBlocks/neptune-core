@@ -138,7 +138,7 @@ impl Transaction {
     ///  2. Update the records
     ///  3. Prove correctness of 1 and 2
     ///  4. Use resulting proof as new witness.
-    pub async fn new_with_updated_mutator_set_records_given_proof(
+    pub(crate) async fn new_with_updated_mutator_set_records_given_proof(
         old_transaction_kernel: TransactionKernel,
         previous_mutator_set_accumulator: &MutatorSetAccumulator,
         mutator_set_update: &MutatorSetUpdate,
@@ -242,7 +242,7 @@ impl Transaction {
     /// set hashes are not the same, if both transactions have coinbase a
     /// coinbase UTXO, if either of the transactions are *not* a single
     /// proof, or if the RHS (`other`) has a negative fee.
-    pub async fn merge_with(
+    pub(crate) async fn merge_with(
         self,
         other: Transaction,
         shuffle_seed: [u8; 32],
@@ -307,7 +307,7 @@ impl Transaction {
     /// PrimitiveWitness::validate and ProofCollection/RemovalRecordsIntegrity.
     /// AOCL membership is a feature of *validity*, which is a pre-requisite to
     /// confirmability.
-    pub fn is_confirmable_relative_to(
+    pub(crate) fn is_confirmable_relative_to(
         &self,
         mutator_set_accumulator: &MutatorSetAccumulator,
     ) -> bool {

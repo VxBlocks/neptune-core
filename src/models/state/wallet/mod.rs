@@ -11,7 +11,7 @@ pub mod transaction_output;
 pub(crate) mod unlocked_utxo;
 pub mod utxo_notification;
 pub mod wallet_configuration;
-pub mod wallet_entropy;
+pub(crate) mod wallet_entropy;
 pub mod wallet_file;
 pub mod wallet_state;
 pub mod wallet_status;

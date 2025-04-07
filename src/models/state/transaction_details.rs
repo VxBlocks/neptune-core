@@ -48,7 +48,7 @@ impl TransactionDetails {
     /// the caller still needs a follow-up proving operation.
     ///
     /// [1]: crate::models::blockchain::transaction::primitive_witness::PrimitiveWitness
-    pub fn fee_gobbler(
+    pub(crate) fn fee_gobbler(
         gobbled_fee: NativeCurrencyAmount,
         sender_randomness: Digest,
         mutator_set_accumulator: MutatorSetAccumulator,
