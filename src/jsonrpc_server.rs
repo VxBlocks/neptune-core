@@ -8,7 +8,7 @@ use crate::models::state::mempool::TransactionOrigin;
 use crate::RPCServerToMain;
 use anyhow::Context;
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::Json;
 use axum::{
     http::StatusCode,
@@ -112,7 +112,8 @@ pub(crate) async fn run_rpc_server(
             .with_state(rpcstate)
             // Enable tower-http tracing.
             .layer(TraceLayer::new_for_http())
-            .layer(RequestBodyLimitLayer::new(200 * 1000 * 1000))
+            .layer(DefaultBodyLimit::disable())
+            // .layer(RequestBodyLimitLayer::new(200 * 1000 * 1000))
             // Enable CORS.
             .layer(cors)
     };
