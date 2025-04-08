@@ -1283,7 +1283,7 @@ impl MainLoopHandler {
                     .is_some_and(|upgrade_interval| duration_since_last_upgrade > upgrade_interval))
         }
 
-        trace!("Running proof upgrader scheduled task");
+        info!("Running proof upgrader scheduled task");
 
         // Check if it's time to run the proof-upgrader, and if we're capable
         // of upgrading a transaction proof.
@@ -1292,16 +1292,16 @@ impl MainLoopHandler {
             let global_state = self.global_state_lock.lock_guard().await;
             let now = self.now();
             if !attempt_upgrade(&global_state, now, tx_upgrade_interval, main_loop_state)? {
-                trace!("Not attempting upgrade.");
+                error!("Not attempting upgrade.");
                 return Ok(());
             }
 
-            debug!("Attempting to run transaction-proof-upgrade");
+            info!("Attempting to run transaction-proof-upgrade");
 
             // Find a candidate for proof upgrade
             let Some((upgrade_candidate, tx_origin)) = get_upgrade_task_from_mempool(&global_state)
             else {
-                debug!("Found no transaction-proof to upgrade");
+                error!("Found no transaction-proof to upgrade");
                 return Ok(());
             };
 
