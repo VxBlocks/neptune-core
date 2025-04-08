@@ -6,7 +6,9 @@ use crate::models::peer::transaction_notification::TransactionNotification;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::models::state::mempool::TransactionOrigin;
 use crate::RPCServerToMain;
-use axum::extract::{Path, State};
+use anyhow::Context;
+use axum::body::Body;
+use axum::extract::{Path, Request, State};
 use axum::Json;
 use axum::{
     http::StatusCode,
@@ -14,14 +16,15 @@ use axum::{
 };
 use axum_extra::response::ErasedJson;
 use block_selector::BlockSelectorExtended;
+use bytes::Buf;
 use itertools::Itertools;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use tasm_lib::prelude::Digest;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::trace::TraceLayer;
 
 use crate::models::blockchain::block::block_height::BlockHeight;
 use crate::models::blockchain::block::block_info::BlockInfo;
@@ -109,7 +112,7 @@ pub(crate) async fn run_rpc_server(
             .with_state(rpcstate)
             // Enable tower-http tracing.
             .layer(TraceLayer::new_for_http())
-            .layer(RequestBodyLimitLayer::new(20 * 1000 * 1000))
+            .layer(RequestBodyLimitLayer::new(200 * 1000 * 1000))
             // Enable CORS.
             .layer(cors)
     };
@@ -465,13 +468,16 @@ struct BroadcastTx {
 }
 async fn broadcast_transaction(
     State(mut rpcstate): State<NeptuneRPCServer>,
-    Json(tx): Json<BroadcastTx>,
+    body: axum::body::Bytes,
 ) -> Result<ErasedJson, RestError> {
+    let tx: BroadcastTx = bincode::deserialize_from(body.reader()).context("deserialize error")?;
     let tx_id = tx.transaction.kernel.txid();
     let mut state = rpcstate.state.lock_guard_mut().await;
     state.mempool_insert(tx.transaction, tx.origin).await;
-    let _ = rpcstate.rpc_server_to_main_tx.send(RPCServerToMain::BroadcastNotification(tx.notification)).await;
-    
+    let _ = rpcstate
+        .rpc_server_to_main_tx
+        .send(RPCServerToMain::BroadcastNotification(tx.notification))
+        .await;
 
     Ok(ErasedJson::pretty(tx_id.to_string()))
 }
