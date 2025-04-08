@@ -1226,8 +1226,8 @@ impl PeerLoopHandler {
             PeerMessage::Transaction(transaction) => {
                 log_slow_scope!(fn_name!() + "::PeerMessage::Transaction");
 
-                debug!(
-                    "`peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
+                info!(
+                    " === `peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
                     transaction.kernel.inputs.len(),
                     transaction.kernel.outputs.len(),
                     transaction.kernel.mutator_set_hash

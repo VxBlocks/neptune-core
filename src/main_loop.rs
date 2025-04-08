@@ -790,8 +790,8 @@ impl MainLoopHandler {
             PeerTaskToMain::Transaction(pt2m_transaction) => {
                 log_slow_scope!(fn_name!() + "::PeerTaskToMain::Transaction");
 
-                debug!(
-                    "`peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
+                info!(
+                    " === `peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
                     pt2m_transaction.transaction.kernel.inputs.len(),
                     pt2m_transaction.transaction.kernel.outputs.len(),
                     pt2m_transaction.transaction.kernel.mutator_set_hash
