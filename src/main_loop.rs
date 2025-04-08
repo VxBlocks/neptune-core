@@ -1276,6 +1276,7 @@ impl MainLoopHandler {
                 .proof_upgrader_task
                 .as_ref()
                 .is_some_and(|x| !x.is_finished());
+            info!("attempt_upgrade {} {} {}",global_state.net.sync_anchor.is_none(), global_state.proving_capability() == TxProvingCapability::SingleProof,!previous_upgrade_task_is_still_running)
             Ok(global_state.net.sync_anchor.is_none()
                 && global_state.proving_capability() == TxProvingCapability::SingleProof
                 && !previous_upgrade_task_is_still_running
