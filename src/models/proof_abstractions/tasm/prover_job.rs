@@ -301,7 +301,7 @@ impl ProverJob {
                 serde_json::to_string(&self.nondeterminism)?,
             ];
 
-            let mut child = tokio::process::Command::new(Self::path_to_triton_vm_prover()?)
+            let mut child = tokio::process::Command::new("triton-vm-prover")
                 .kill_on_drop(true) // extra insurance.
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
