@@ -34,7 +34,7 @@ pub struct BlockRecord {
     pub num_additions: u64,
 
     /// The data missing from BlockHeader in order to calculate the block hash.
-    pub(crate) block_hash_witness: HeaderToBlockHashWitness,
+    pub block_hash_witness: HeaderToBlockHashWitness,
 }
 
 impl BlockRecord {

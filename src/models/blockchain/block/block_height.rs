@@ -63,7 +63,7 @@ impl BlockHeight {
         self.0.is_zero()
     }
 
-    pub(crate) fn arithmetic_mean(left: Self, right: Self) -> Self {
+    pub fn arithmetic_mean(left: Self, right: Self) -> Self {
         // Calculate arithmetic mean, without risk of overflow.
         let left = left.0.value();
         let right = right.0.value();

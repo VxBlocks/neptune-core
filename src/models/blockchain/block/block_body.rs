@@ -64,7 +64,7 @@ impl HasDiscriminant for BlockBodyField {
 pub struct BlockBody {
     /// Every block contains exactly one transaction, which represents the merger of all
     /// broadcasted transactions that the miner decided to confirm.
-    pub(crate) transaction_kernel: TransactionKernel,
+    pub transaction_kernel: TransactionKernel,
 
     /// The mutator set accumulator represents the UTXO set. It is simultaneously an
     /// accumulator (=> compact representation and membership proofs) and an anonymity

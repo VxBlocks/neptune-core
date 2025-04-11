@@ -296,7 +296,7 @@ impl<Storage: StorageVec<Digest>> ArchivalMmr<Storage> {
 
     /// Returns the right-most leaf of the MMR, the leaf that was added the
     /// latest.
-    pub(crate) async fn get_latest_leaf(&self) -> Option<Digest> {
+    pub async fn get_latest_leaf(&self) -> Option<Digest> {
         if self.is_empty().await {
             return None;
         }
@@ -328,7 +328,7 @@ impl<Storage: StorageVec<Digest>> ArchivalMmr<Storage> {
     /// Remove the last leafs of the MMR such that only the specified number
     /// of leafs remain. If initial number of leafs is less than requested,
     /// this MMR is not mutated.
-    pub(crate) async fn prune_to_num_leafs(&mut self, num_leafs: u64) {
+    pub async fn prune_to_num_leafs(&mut self, num_leafs: u64) {
         let index_of_last_removal = leaf_index_to_node_index(num_leafs);
 
         while self.digests.len().await > index_of_last_removal {

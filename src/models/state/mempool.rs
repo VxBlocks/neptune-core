@@ -91,7 +91,7 @@ pub enum MempoolEvent {
 /// initiated locally or not.
 #[derive(Debug, GetSize, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(arbitrary::Arbitrary))]
-pub(crate) enum TransactionOrigin {
+pub enum TransactionOrigin {
     Foreign,
     Own,
 }
@@ -351,7 +351,7 @@ impl Mempool {
     /// # Panics
     ///
     /// Panics if the transaction's proof is of the wrong type.
-    pub(super) fn insert(
+    pub fn insert(
         &mut self,
         new_tx: Transaction,
         origin: TransactionOrigin,
@@ -640,7 +640,7 @@ impl Mempool {
     /// caller to ensure these updates happen. Returned mempool events does not
     /// include information about mutator set updates. That must be handled by
     /// the caller where the update jobs are executed.
-    pub(super) fn update_with_block_and_predecessor(
+    pub fn update_with_block_and_predecessor(
         &mut self,
         new_block: &Block,
         predecessor_block: &Block,

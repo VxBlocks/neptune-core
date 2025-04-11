@@ -8,13 +8,13 @@ use crate::database::storage::storage_schema::RustyValue;
 use crate::database::storage::storage_schema::SimpleRustyStorage;
 use crate::database::NeptuneLevelDb;
 
-pub(crate) struct RustyArchivalBlockMmr {
+pub struct RustyArchivalBlockMmr {
     ammr: ArchivalMmr<DbtVec<Digest>>,
     storage: SimpleRustyStorage,
 }
 
 impl RustyArchivalBlockMmr {
-    pub(crate) async fn connect(db: NeptuneLevelDb<RustyKey, RustyValue>) -> Self {
+    pub async fn connect(db: NeptuneLevelDb<RustyKey, RustyValue>) -> Self {
         let mut storage = SimpleRustyStorage::new_with_callback(
             db,
             "archival-block-mmr-Schema",

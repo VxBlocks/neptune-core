@@ -462,7 +462,7 @@ impl WalletState {
     }
 
     /// handles a list of mempool events
-    pub(in crate::models::state) async fn handle_mempool_events(
+    pub async fn handle_mempool_events(
         &mut self,
         events: impl IntoIterator<Item = MempoolEvent>,
     ) {
