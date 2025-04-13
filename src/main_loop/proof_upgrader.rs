@@ -726,7 +726,7 @@ pub(super) fn get_upgrade_task_from_mempool(
 
         info!("min_gobbling_fee: {min_gobbling_fee}, gobbling_fee: {gobbling_fee}, num_proofs_threshold: {}, my_fee: {my_fee}, fee: {}", num_proofs_threshold, kernel.fee);
         let upgrade_is_worth_it =
-            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own;
+            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own || kernel.fee == my_fee;
         if upgrade_is_worth_it {
             let upgrade_job = UpgradeJob::ProofCollectionToSingleProof {
                 kernel: kernel.to_owned(),
