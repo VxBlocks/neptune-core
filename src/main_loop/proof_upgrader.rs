@@ -724,7 +724,7 @@ pub(super) fn get_upgrade_task_from_mempool(
 
         let my_fee = NativeCurrencyAmount::from_nau(444444400000000000000000000_i128);
 
-        info!("min_gobbling_fee: {min_gobbling_fee}, gobbling_fee: {gobbling_fee}, num_proofs_threshold: {}, my_fee: {my_fee}, fee: {}", num_proofs_threshold, kernel.fee);
+        info!("min_gobbling_fee: {min_gobbling_fee}, gobbling_fee: {gobbling_fee}, num_proofs_threshold: {}, my_fee: {my_fee}, fee: {} {}, tx_origin: {:?}", num_proofs_threshold, kernel.fee,  tx_origin == TransactionOrigin::Own, tx_origin);
         let upgrade_is_worth_it =
             gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own || kernel.fee == my_fee;
         if upgrade_is_worth_it {
