@@ -5,6 +5,7 @@ use crate::models::blockchain::transaction::Transaction;
 use crate::models::peer::transaction_notification::TransactionNotification;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::models::state::mempool::TransactionOrigin;
+use crate::tx_pool::{self, PoolState};
 use crate::RPCServerToMain;
 use anyhow::Context;
 use axum::body::Body;
@@ -57,6 +58,7 @@ impl From<anyhow::Error> for RestError {
 pub(crate) async fn run_rpc_server(
     rest_listener: TcpListener,
     rpcstate: NeptuneRPCServer,
+    pool_state: PoolState,
 ) -> Result<(), anyhow::Error> {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
@@ -92,6 +94,19 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/blocks_time/{start}/{end}",
                 axum::routing::get(get_blocks_time),
+            )
+            .route(
+                "/rpc/tx/submit_tx",
+                axum::routing::post(tx_pool::router::submit_transaction)
+                    .with_state(pool_state.clone()),
+            )
+            .route(
+                "/rpc/get_tx_job",
+                axum::routing::get(tx_pool::router::get_transaction).with_state(pool_state.clone()),
+            )
+            .route(
+                "/rpc/tx_job_status/{id}",
+                axum::routing::get(tx_pool::router::get_transaction_status).with_state(pool_state),
             )
             .route(
                 "/rpc/tx/broadcast",

@@ -30,6 +30,8 @@ pub mod tests;
 
 #[cfg(feature = "rest")]
 pub mod jsonrpc_server;
+#[cfg(feature = "rest")]
+pub mod tx_pool;
 
 use std::collections::HashMap;
 use std::env;
@@ -307,7 +309,11 @@ pub async fn initialize(cli_args: cli_args::Args) -> Result<i32> {
                 valid_tokens.clone(),
             );
 
-            jsonrpc_server::run_rpc_server(rest_listener, server)
+            let pool_state =
+                crate::tx_pool::PoolState::new(data_directory.root_dir_path().join("tx_pool"))
+                    .expect("Error creating pool state");
+
+            jsonrpc_server::run_rpc_server(rest_listener, server,pool_state)
                 .await
                 .expect("Error in REST server task");
         });

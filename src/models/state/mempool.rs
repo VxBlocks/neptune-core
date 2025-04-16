@@ -449,7 +449,7 @@ impl Mempool {
     }
 
     /// remove a transaction from the `Mempool`
-    pub(super) fn remove(&mut self, transaction_id: TransactionKernelId) -> Option<MempoolEvent> {
+    pub fn remove(&mut self, transaction_id: TransactionKernelId) -> Option<MempoolEvent> {
         self.tx_dictionary.remove(&transaction_id).map(|tx| {
             self.queue.remove(&transaction_id);
             debug_assert_eq!(self.tx_dictionary.len(), self.queue.len());

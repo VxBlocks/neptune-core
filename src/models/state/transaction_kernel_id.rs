@@ -15,6 +15,12 @@ use crate::models::blockchain::transaction::transaction_kernel::TransactionKerne
 #[derive(Debug, Clone, Copy, PartialEq, Eq, GetSize, Hash, Serialize, Deserialize)]
 pub struct TransactionKernelId(Digest);
 
+impl TransactionKernelId {
+    pub fn new(digest: Digest) -> Self {
+        Self(digest)
+    }
+}
+
 impl Display for TransactionKernelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.to_hex())

@@ -436,7 +436,7 @@ impl PrimitiveWitness {
     /// spent in the supplied mutator set update. Otherwise panics. Also
     /// assumes that the lock script witnesses are still valid under the new
     /// mutator set.
-    pub(crate) fn update_with_new_ms_data(self, mutator_set_update: MutatorSetUpdate) -> Self {
+    pub fn update_with_new_ms_data(self, mutator_set_update: MutatorSetUpdate) -> Self {
         let mut msa_state: MutatorSetAccumulator = self.mutator_set_accumulator.clone();
         let mut transaction_removal_records: Vec<RemovalRecord> = self.kernel.inputs.clone();
         let mut transaction_removal_records: Vec<&mut RemovalRecord> =

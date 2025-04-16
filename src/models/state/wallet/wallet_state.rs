@@ -80,8 +80,8 @@ pub struct WalletState {
 
     /// these two fields are for monitoring wallet-affecting utxos in the mempool.
     /// key is Tx hash.  for removing watched utxos when a tx is removed from mempool.
-    mempool_spent_utxos: HashMap<TransactionKernelId, Vec<(Utxo, AbsoluteIndexSet, u64)>>,
-    mempool_unspent_utxos: HashMap<TransactionKernelId, Vec<IncomingUtxo>>,
+    pub mempool_spent_utxos: HashMap<TransactionKernelId, Vec<(Utxo, AbsoluteIndexSet, u64)>>,
+    pub mempool_unspent_utxos: HashMap<TransactionKernelId, Vec<IncomingUtxo>>,
 
     // these fields represent all known keys that have been handed out,
     // ie keys with derivation index in 0..self.spending_key_counter(key_type)

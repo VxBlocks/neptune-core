@@ -22,8 +22,8 @@ use crate::util_types::mutator_set::commit;
 /// See [UtxoNotificationPayload], [ExpectedUtxo]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(Arbitrary))]
-pub(crate) struct IncomingUtxo {
-    pub(crate) utxo: Utxo,
+pub struct IncomingUtxo {
+    pub utxo: Utxo,
     pub(crate) sender_randomness: Digest,
     pub(crate) receiver_preimage: Digest,
 }
