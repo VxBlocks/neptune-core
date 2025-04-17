@@ -4,7 +4,7 @@ pub mod expected_utxo;
 pub(crate) mod incoming_utxo;
 pub mod monitored_utxo;
 pub(crate) mod rusty_wallet_database;
-pub(crate) mod scan_mode_configuration;
+pub mod scan_mode_configuration;
 pub mod secret_key_material;
 pub mod sent_transaction;
 pub mod transaction_output;

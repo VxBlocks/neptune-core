@@ -17,7 +17,7 @@ use crate::config_models::network::Network;
 pub struct WalletConfiguration {
     /// Whether we are in scan mode and, if so, how many future keys to scan
     /// with and the range of block heights where the scanning step is done.
-    pub(crate) scan_mode: Option<ScanModeConfiguration>,
+    pub scan_mode: Option<ScanModeConfiguration>,
 
     /// How many mutator set membership proofs to store per monitored UTXO.
     pub num_mps_per_utxo: usize,

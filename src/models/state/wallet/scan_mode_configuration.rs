@@ -14,9 +14,9 @@ use crate::models::blockchain::block::Block;
 /// message is observed, the derivation index counter is updated accordingly.
 /// The number of future indices to scan for is a tunable parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ScanModeConfiguration {
-    num_future_keys: usize,
-    first_block_height: BlockHeight,
+pub struct ScanModeConfiguration {
+    pub num_future_keys: usize,
+    pub first_block_height: BlockHeight,
     last_block_height: Option<BlockHeight>,
 
     /// Relates to the attempted recovery of composer rewards, assuming the user
