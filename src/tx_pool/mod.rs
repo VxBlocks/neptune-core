@@ -88,9 +88,7 @@ impl PoolState {
             stmt.bind((3, fee))?;
             stmt.next()?;
 
-            let mut stmt = self
-               .db
-               .prepare("DELETE FROM transactions WHERE id=?")?;
+            let mut stmt = self.db.prepare("DELETE FROM transactions WHERE id=?")?;
             stmt.bind((1, id.as_str()))?;
             stmt.next()?;
 
@@ -111,6 +109,23 @@ impl PoolState {
         }
 
         Ok(None)
+    }
+
+    pub fn get_pending_transaction(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self.db.prepare("SELECT * FROM transactions WHERE id=?")?;
+        stmt.bind((1, id))?;
+        while let Ok(State::Row) = stmt.next() {
+            let txid = stmt.read::<String, _>("id").unwrap();
+            return Ok(Some(txid));
+        }
+
+        Ok(None)
+    }
+
+    pub fn drop_old_transaction(&self) -> Result<()> {
+        let mut stmt = self.db.prepare("DELETE transactions")?;
+        stmt.next()?;
+        Ok(())
     }
 
     pub fn finish_transaction(&self, id: &str) -> anyhow::Result<()> {
