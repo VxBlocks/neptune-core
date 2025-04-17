@@ -297,7 +297,9 @@ impl PeerLoopHandler {
         for new_block in &received_blocks {
             let new_block_has_proof_of_work = new_block.has_proof_of_work(previous_block.header());
             debug!("new block has proof of work? {new_block_has_proof_of_work}");
-            let new_block_is_valid = new_block.is_valid(previous_block, now).await;
+            let new_block_is_valid = new_block
+                .is_valid(previous_block, now, self.global_state_lock.cli().network)
+                .await;
             debug!("new block is valid? {new_block_is_valid}");
             if !new_block_has_proof_of_work {
                 warn!(
@@ -420,7 +422,11 @@ impl PeerLoopHandler {
             peer_state.fork_reconciliation_blocks.last()
         {
             let valid = successor
-                .is_valid(received_block.as_ref(), self.now())
+                .is_valid(
+                    received_block.as_ref(),
+                    self.now(),
+                    self.global_state_lock.cli().network,
+                )
                 .await;
             if !valid {
                 warn!(
@@ -791,7 +797,10 @@ impl PeerLoopHandler {
                 // Does response verify?
                 let claimed_tip_height = challenge_response.tip.header.height;
                 let now = self.now();
-                if !challenge_response.is_valid(now).await {
+                if !challenge_response
+                    .is_valid(now, self.global_state_lock.cli().network)
+                    .await
+                {
                     self.punish(NegativePeerSanction::InvalidSyncChallengeResponse)
                         .await?;
                     return Ok(KEEP_CONNECTION_ALIVE);
@@ -1226,8 +1235,8 @@ impl PeerLoopHandler {
             PeerMessage::Transaction(transaction) => {
                 log_slow_scope!(fn_name!() + "::PeerMessage::Transaction");
 
-                info!(
-                    " === `peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
+                debug!(
+                    "`peer_loop` received following transaction from peer. {} inputs, {} outputs. Synced to mutator set hash: {}",
                     transaction.kernel.inputs.len(),
                     transaction.kernel.outputs.len(),
                     transaction.kernel.mutator_set_hash
@@ -1525,7 +1534,10 @@ impl PeerLoopHandler {
                         }
                     } else {
                         // Verify validity and that proposal is child of current tip
-                        if block.is_valid(&tip, self.now()).await {
+                        if block
+                            .is_valid(&tip, self.now(), self.global_state_lock.cli().network)
+                            .await
+                        {
                             None // all is well, no punishment.
                         } else {
                             Some(NegativePeerSanction::InvalidBlockProposal)
@@ -1741,8 +1753,11 @@ impl PeerLoopHandler {
 
                 // Handle messages from main task
                 main_msg_res = from_main_rx.recv() => {
-                    let main_msg = main_msg_res
-                        .unwrap_or_else(|e| panic!("Failed to read from main loop: {e}"));
+                    let main_msg = main_msg_res.unwrap_or_else(|err| {
+                        let err_msg = format!("Failed to read from main loop: {err}");
+                        error!(err_msg);
+                        panic!("{err_msg}");
+                    });
                     let close_connection = self
                         .handle_main_task_message(main_msg, &mut peer, peer_state_info)
                         .await
@@ -1925,14 +1940,13 @@ mod peer_loop_tests {
     use super::*;
     use crate::config_models::cli_args;
     use crate::config_models::network::Network;
-    use crate::job_queue::triton_vm::TritonVmJobQueue;
     use crate::models::blockchain::block::block_header::TARGET_BLOCK_INTERVAL;
     use crate::models::blockchain::type_scripts::native_currency_amount::NativeCurrencyAmount;
     use crate::models::peer::peer_block_notifications::PeerBlockNotification;
     use crate::models::peer::transaction_notification::TransactionNotification;
     use crate::models::state::mempool::TransactionOrigin;
+    use crate::models::state::tx_creation_config::TxCreationConfig;
     use crate::models::state::tx_proving_capability::TxProvingCapability;
-    use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
     use crate::models::state::wallet::wallet_entropy::WalletEntropy;
     use crate::tests::shared::fake_valid_block_for_tests;
     use crate::tests::shared::fake_valid_sequence_of_blocks_for_tests;
@@ -2051,6 +2065,7 @@ mod peer_loop_tests {
             &different_genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         let mock = Mock::new(vec![Action::Read(PeerMessage::Block(Box::new(
@@ -2162,6 +2177,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
 
@@ -2246,7 +2262,7 @@ mod peer_loop_tests {
         let block_1 =
             fake_valid_block_for_tests(&alice, StdRng::seed_from_u64(5550001).random()).await;
         assert!(
-            block_1.is_valid(&genesis_block, now).await,
+            block_1.is_valid(&genesis_block, now, network).await,
             "Block must be valid for this test to make sense"
         );
         alice.set_new_tip(block_1.clone()).await?;
@@ -2308,6 +2324,7 @@ mod peer_loop_tests {
                 &genesis_block,
                 Timestamp::hours(1),
                 StdRng::seed_from_u64(5550001).random(),
+                network,
             )
             .await;
         let blocks = vec![
@@ -2380,12 +2397,14 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         let [block_2_b, block_3_b] = fake_valid_sequence_of_blocks_for_tests(
             &block_1,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550002).random(),
+            network,
         )
         .await;
         assert_ne!(block_2_b.hash(), block_2_a.hash());
@@ -2496,12 +2515,14 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         let [block_2_b, block_3_b] = fake_valid_sequence_of_blocks_for_tests(
             &block_1,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550002).random(),
+            network,
         )
         .await;
         assert_ne!(block_2_a.hash(), block_2_b.hash());
@@ -2629,12 +2650,14 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         let [block_2_b, block_3_b] = fake_valid_sequence_of_blocks_for_tests(
             &block_1,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550002).random(),
+            network,
         )
         .await;
         assert_ne!(block_2_a.hash(), block_2_b.hash());
@@ -2727,6 +2750,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             rng.random(),
+            network,
         )
         .await;
         let block7 = blocks.last().unwrap().to_owned();
@@ -2832,6 +2856,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
 
@@ -2911,6 +2936,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             rng.random(),
+            network,
         )
         .await;
         state_lock.set_new_tip(block_1.clone()).await?;
@@ -2988,6 +3014,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         state_lock.set_new_tip(block_1.clone()).await.unwrap();
@@ -3054,6 +3081,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
 
@@ -3142,6 +3170,7 @@ mod peer_loop_tests {
                 &genesis_block,
                 Timestamp::hours(1),
                 StdRng::seed_from_u64(5550001).random(),
+                network,
             )
             .await;
         state_lock.set_new_tip(block_1.clone()).await?;
@@ -3246,6 +3275,7 @@ mod peer_loop_tests {
             &genesis_block,
             Timestamp::hours(1),
             StdRng::seed_from_u64(5550001).random(),
+            network,
         )
         .await;
         state_lock.set_new_tip(block_1.clone()).await?;
@@ -3393,20 +3423,22 @@ mod peer_loop_tests {
             .nth_symmetric_key_for_tests(0);
         let genesis_block = Block::genesis(network);
         let now = genesis_block.kernel.header.timestamp;
-        let (transaction_1, _, _change_output) = state_lock
-            .lock_guard()
-            .await
-            .create_transaction_with_prover_capability(
+        let config = TxCreationConfig::default()
+            .recover_change_off_chain(spending_key.into())
+            .with_prover_capability(TxProvingCapability::ProofCollection);
+        let transaction_1: Transaction = state_lock
+            .api()
+            .tx_initiator_internal()
+            .create_transaction(
                 Default::default(),
-                spending_key.into(),
-                UtxoNotificationMedium::OffChain,
                 NativeCurrencyAmount::coins(0),
                 now,
-                TxProvingCapability::ProofCollection,
-                &TritonVmJobQueue::dummy(),
+                config,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .transaction
+            .into();
 
         // Build the resulting transaction notification
         let tx_notification: TransactionNotification = (&transaction_1).try_into().unwrap();
@@ -3476,20 +3508,22 @@ mod peer_loop_tests {
 
         let genesis_block = Block::genesis(network);
         let now = genesis_block.kernel.header.timestamp;
-        let (transaction_1, _, _change_output) = state_lock
-            .lock_guard()
-            .await
-            .create_transaction_with_prover_capability(
+        let config = TxCreationConfig::default()
+            .recover_change_off_chain(spending_key.into())
+            .with_prover_capability(TxProvingCapability::ProofCollection);
+        let transaction_1: Transaction = state_lock
+            .api()
+            .tx_initiator_internal()
+            .create_transaction(
                 Default::default(),
-                spending_key.into(),
-                UtxoNotificationMedium::OffChain,
                 NativeCurrencyAmount::coins(0),
                 now,
-                TxProvingCapability::ProofCollection,
-                &TritonVmJobQueue::dummy(),
+                config,
             )
             .await
-            .unwrap();
+            .unwrap()
+            .transaction
+            .into();
 
         let (hsd_1, _sa_1) = get_dummy_peer_connection_data_genesis(network, 1);
         let mut peer_loop_handler = PeerLoopHandler::new(
@@ -3666,6 +3700,7 @@ mod peer_loop_tests {
         use crate::config_models::cli_args;
         use crate::models::blockchain::transaction::Transaction;
         use crate::models::peer::transfer_transaction::TransactionProofQuality;
+        use crate::models::state::wallet::transaction_output::TxOutput;
         use crate::tests::shared::mock_genesis_global_state;
 
         async fn tx_of_proof_quality(
@@ -3674,29 +3709,32 @@ mod peer_loop_tests {
         ) -> Transaction {
             let wallet_secret = WalletEntropy::devnet_wallet();
             let alice_key = wallet_secret.nth_generation_spending_key_for_tests(0);
-            let alice =
+            let alice_gsl =
                 mock_genesis_global_state(network, 1, wallet_secret, cli_args::Args::default())
                     .await;
-            let alice = alice.lock_guard().await;
+            let alice = alice_gsl.lock_guard().await;
             let genesis_block = alice.chain.light_state();
             let in_seven_months = genesis_block.header().timestamp + Timestamp::months(7);
             let prover_capability = match quality {
                 TransactionProofQuality::ProofCollection => TxProvingCapability::ProofCollection,
                 TransactionProofQuality::SingleProof => TxProvingCapability::SingleProof,
             };
-            alice
-                .create_transaction_with_prover_capability(
-                    vec![].into(),
-                    alice_key.into(),
-                    UtxoNotificationMedium::OffChain,
+            let config = TxCreationConfig::default()
+                .recover_change_off_chain(alice_key.into())
+                .with_prover_capability(prover_capability);
+            alice_gsl
+                .api()
+                .tx_initiator_internal()
+                .create_transaction(
+                    Vec::<TxOutput>::new().into(),
                     NativeCurrencyAmount::coins(1),
                     in_seven_months,
-                    prover_capability,
-                    &TritonVmJobQueue::dummy(),
+                    config,
                 )
                 .await
                 .unwrap()
-                .0
+                .transaction()
+                .clone()
         }
 
         #[traced_test]
@@ -3740,7 +3778,7 @@ mod peer_loop_tests {
                 alice
                     .lock_guard_mut()
                     .await
-                    .mempool_insert(own_tx.to_owned(), TransactionOrigin::Foreign)
+                    .mempool_insert((*own_tx).to_owned(), TransactionOrigin::Foreign)
                     .await;
 
                 let tx_notification: TransactionNotification = new_tx.try_into().unwrap();
@@ -3827,6 +3865,7 @@ mod peer_loop_tests {
                 &genesis_block,
                 Timestamp::hours(1),
                 [0u8; 32],
+                network,
             )
             .await;
             for block in &blocks {
@@ -3975,7 +4014,7 @@ mod peer_loop_tests {
             let now = genesis_block.header().timestamp + Timestamp::hours(1);
             let block_1 = fake_valid_block_for_tests(&alice, rng.random()).await;
             assert!(
-                block_1.is_valid(&genesis_block, now).await,
+                block_1.is_valid(&genesis_block, now, network).await,
                 "Block must be valid for this test to make sense"
             );
             let alice_tip = &block_1;
@@ -3988,6 +4027,7 @@ mod peer_loop_tests {
                 &block_1,
                 TARGET_BLOCK_INTERVAL,
                 rng.random(),
+                network,
                 rng.random_range(ALICE_SYNC_MODE_THRESHOLD + 1..20),
             )
             .await;

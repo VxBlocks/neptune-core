@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use itertools::Itertools;
@@ -100,7 +101,7 @@ impl UpdateMutatorSetDataJob {
 
     pub(crate) async fn upgrade(
         self,
-        triton_vm_job_queue: &TritonVmJobQueue,
+        triton_vm_job_queue: Arc<TritonVmJobQueue>,
         proof_job_options: TritonVmProofJobOptions,
     ) -> anyhow::Result<Transaction> {
         let UpdateMutatorSetDataJob {
@@ -292,7 +293,7 @@ impl UpgradeJob {
     /// informs peers of this new transaction.
     pub(crate) async fn handle_upgrade(
         self,
-        triton_vm_job_queue: &TritonVmJobQueue,
+        triton_vm_job_queue: Arc<TritonVmJobQueue>,
         tx_origin: TransactionOrigin,
         perform_ms_update_if_needed: bool,
         mut global_state_lock: GlobalStateLock,
@@ -340,7 +341,7 @@ impl UpgradeJob {
             let (upgraded, expected_utxos) = match upgrade_job
                 .clone()
                 .upgrade(
-                    triton_vm_job_queue,
+                    triton_vm_job_queue.clone(),
                     job_options,
                     &wallet_entropy,
                     block_height,
@@ -405,11 +406,18 @@ impl UpgradeJob {
                     drop(global_state); // sooner is better.
 
                     // Inform all peers about our hard work
-                    main_to_peer_channel
-                        .send(MainToPeerTask::TransactionNotification(
-                            (&upgraded).try_into().unwrap(),
-                        ))
-                        .unwrap();
+                    let peer_msg =
+                        MainToPeerTask::TransactionNotification((&upgraded).try_into().unwrap());
+
+                    if let Err(e) = main_to_peer_channel.send(peer_msg) {
+                        // panic only if receiver_count is non-zero.
+                        let receiver_count = main_to_peer_channel.receiver_count();
+                        assert_eq!(
+                            receiver_count, 0,
+                            "failed to broadcast message from main to {} peers: {:?}",
+                            receiver_count, e
+                        );
+                    }
 
                     info!("Successfully handled proof upgrade.");
                     return;
@@ -487,12 +495,8 @@ impl UpgradeJob {
                 SpendingKey::from(own_wallet_entropy.nth_generation_spending_key(0))
             }
         };
-        let receiver_preimage = gobble_beneficiary_key
-            .privacy_preimage()
-            .expect("gobble beneficiary key cannot be a raw hash lock");
-        let gobble_beneficiary_address = gobble_beneficiary_key
-            .to_address()
-            .expect("gobble beneficiary should have a corresponding address");
+        let receiver_preimage = gobble_beneficiary_key.privacy_preimage();
+        let gobble_beneficiary_address = gobble_beneficiary_key.to_address();
 
         let fee_notification_method = match notification_policy {
             FeeNotificationPolicy::OffChain => {
@@ -517,7 +521,7 @@ impl UpgradeJob {
     /// prover is busy.
     pub(crate) async fn upgrade(
         self,
-        triton_vm_job_queue: &TritonVmJobQueue,
+        triton_vm_job_queue: Arc<TritonVmJobQueue>,
         proof_job_options: TritonVmProofJobOptions,
         own_wallet_entropy: &WalletEntropy,
         current_block_height: BlockHeight,
@@ -542,6 +546,7 @@ impl UpgradeJob {
                 mutator_set,
                 old_tx_timestamp,
                 utxo_notification_method,
+                proof_job_options.job_settings.network,
             );
 
             let expected_utxos = if fee_notification_policy == FeeNotificationPolicy::OffChain {
@@ -552,9 +557,12 @@ impl UpgradeJob {
                 vec![]
             };
             let gobbler = PrimitiveWitness::from_transaction_details(&gobbler);
-            let gobbler_proof =
-                SingleProof::produce(&gobbler, triton_vm_job_queue, proof_job_options.clone())
-                    .await?;
+            let gobbler_proof = SingleProof::produce(
+                &gobbler,
+                triton_vm_job_queue.clone(),
+                proof_job_options.clone(),
+            )
+            .await?;
             info!("Done producing gobbler-transaction for a value of {gobbling_fee}");
             let gobbler = Transaction {
                 kernel: gobbler.kernel,
@@ -579,7 +587,7 @@ impl UpgradeJob {
                     .prove(
                         claim,
                         nondeterminism,
-                        triton_vm_job_queue,
+                        triton_vm_job_queue.clone(),
                         proof_job_options.clone(),
                     )
                     .await?;
@@ -599,7 +607,7 @@ impl UpgradeJob {
                         .merge_with(
                             rhs,
                             gobble_shuffle_seed,
-                            triton_vm_job_queue,
+                            triton_vm_job_queue.clone(),
                             proof_job_options,
                         )
                         .await?;
@@ -632,7 +640,7 @@ impl UpgradeJob {
                     left,
                     right,
                     shuffle_seed.to_owned(),
-                    triton_vm_job_queue,
+                    triton_vm_job_queue.clone(),
                     proof_job_options.clone(),
                 )
                 .await?;
@@ -722,11 +730,8 @@ pub(super) fn get_upgrade_task_from_mempool(
             kernel.fee.lossy_f64_fraction_mul(gobbling_fraction)
         };
 
-        let my_fee = NativeCurrencyAmount::from_nau(444444400000000000000000000_i128);
-
-        info!("min_gobbling_fee: {min_gobbling_fee}, gobbling_fee: {gobbling_fee}, num_proofs_threshold: {}, my_fee: {my_fee}, fee: {} {}, tx_origin: {:?}", num_proofs_threshold, kernel.fee,  tx_origin == TransactionOrigin::Own, tx_origin);
         let upgrade_is_worth_it =
-            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own || kernel.fee == my_fee;
+            gobbling_fee >= min_gobbling_fee || tx_origin == TransactionOrigin::Own;
         if upgrade_is_worth_it {
             let upgrade_job = UpgradeJob::ProofCollectionToSingleProof {
                 kernel: kernel.to_owned(),
@@ -806,9 +811,9 @@ mod test {
     use crate::config_models::cli_args;
     use crate::config_models::network::Network;
     use crate::models::blockchain::block::Block;
+    use crate::models::state::tx_creation_config::TxCreationConfig;
     use crate::models::state::wallet::address::generation_address::GenerationReceivingAddress;
     use crate::models::state::wallet::transaction_output::TxOutput;
-    use crate::models::state::wallet::utxo_notification::UtxoNotificationMedium;
     use crate::tests::shared::fake_block_successor_with_merged_tx;
     use crate::tests::shared::get_test_genesis_setup;
     use crate::tests::shared::invalid_empty_block_with_timestamp;
@@ -823,7 +828,7 @@ mod test {
         seed: u64,
         proof_quality: TxProvingCapability,
         fee: NativeCurrencyAmount,
-    ) -> Transaction {
+    ) -> Arc<Transaction> {
         let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
         let receiving_address = GenerationReceivingAddress::derive_from_seed(rng.random());
         let tx_outputs = vec![TxOutput::onchain_native_currency(
@@ -833,23 +838,22 @@ mod test {
             false,
         )]
         .into();
-        let mut state = state.lock_guard_mut().await;
-        let change_key = state.wallet_state.next_unused_symmetric_key().await;
+        let mut gsm = state.lock_guard_mut().await;
+        let change_key = gsm.wallet_state.next_unused_symmetric_key().await;
+        drop(gsm);
+        let dummy = TritonVmJobQueue::dummy();
         let timestamp = Network::Main.launch_date() + Timestamp::months(7);
-        let (tx, _, _) = state
-            .create_transaction_with_prover_capability(
-                tx_outputs,
-                change_key.into(),
-                UtxoNotificationMedium::OffChain,
-                fee,
-                timestamp,
-                proof_quality,
-                &TritonVmJobQueue::dummy(),
-            )
+        let config = TxCreationConfig::default()
+            .recover_change_off_chain(change_key.into())
+            .with_prover_capability(proof_quality)
+            .use_job_queue(dummy);
+        state
+            .api()
+            .tx_initiator_internal()
+            .create_transaction(tx_outputs, fee, timestamp, config)
             .await
-            .unwrap();
-
-        tx
+            .unwrap()
+            .transaction
     }
 
     #[traced_test]
@@ -884,7 +888,9 @@ mod test {
             )
             .await;
             let mut rando = rando.lock_guard_mut().await;
-            rando.mempool_insert(pc_tx_low_fee.clone(), tx_origin).await;
+            rando
+                .mempool_insert(pc_tx_low_fee.clone().into(), tx_origin)
+                .await;
             if tx_origin == TransactionOrigin::Own {
                 assert!(get_upgrade_task_from_mempool(&rando).is_some());
             } else {
@@ -901,7 +907,7 @@ mod test {
             )
             .await;
             rando
-                .mempool_insert(pc_tx_high_fee.clone(), TransactionOrigin::Foreign)
+                .mempool_insert(pc_tx_high_fee.clone().into(), TransactionOrigin::Foreign)
                 .await;
             let job = get_upgrade_task_from_mempool(&rando).unwrap().0;
             let UpgradeJob::ProofCollectionToSingleProof { kernel, .. } = job else {
@@ -941,7 +947,7 @@ mod test {
             alice
                 .lock_guard_mut()
                 .await
-                .mempool_insert(pwtx.clone(), TransactionOrigin::Own)
+                .mempool_insert((*pwtx).clone(), TransactionOrigin::Own)
                 .await;
             let TransactionProof::Witness(pw) = &pwtx.proof else {
                 panic!("Expected PW-backed tx");
@@ -950,7 +956,7 @@ mod test {
                 UpgradeJob::from_primitive_witness(proving_capability, pw.to_owned());
             pw_to_tx_upgrade_job
                 .handle_upgrade(
-                    &TritonVmJobQueue::dummy(),
+                    TritonVmJobQueue::dummy(),
                     TransactionOrigin::Own,
                     true,
                     alice.clone(),
@@ -1019,7 +1025,7 @@ mod test {
             alice
                 .lock_guard_mut()
                 .await
-                .mempool_insert(pwtx.clone(), TransactionOrigin::Own)
+                .mempool_insert((*pwtx).clone(), TransactionOrigin::Own)
                 .await;
             let TransactionProof::Witness(pw) = &pwtx.proof else {
                 panic!("Expected PW-backed tx");
@@ -1034,7 +1040,7 @@ mod test {
             alice.set_new_tip(block1).await.unwrap();
             upgrade_job
                 .handle_upgrade(
-                    &TritonVmJobQueue::dummy(),
+                    TritonVmJobQueue::dummy(),
                     TransactionOrigin::Own,
                     true,
                     alice.clone(),
@@ -1097,7 +1103,12 @@ mod test {
         // Alice is premine recipient and has mined on block, so she can make
         // (at least) two transaction.
         let mut rng: StdRng = StdRng::seed_from_u64(512777439429);
-        let mut alice = state_with_premine_and_self_mined_blocks(network, &mut rng, 1).await;
+        let cli_args = cli_args::Args {
+            network,
+            tx_proving_capability: Some(TxProvingCapability::SingleProof),
+            ..Default::default()
+        };
+        let mut alice = state_with_premine_and_self_mined_blocks(cli_args, &mut rng, 1).await;
 
         let mut transactions = vec![];
         for _ in 0..=1 {
@@ -1112,7 +1123,7 @@ mod test {
             alice
                 .lock_guard_mut()
                 .await
-                .mempool_insert(single_proof_tx.clone(), TransactionOrigin::Own)
+                .mempool_insert(single_proof_tx.clone().into(), TransactionOrigin::Own)
                 .await;
             transactions.push(single_proof_tx);
         }
@@ -1137,16 +1148,22 @@ mod test {
         let block1 = alice.lock_guard().await.chain.light_state().to_owned();
 
         let now = block1.header().timestamp + Timestamp::hours(1);
-        let block2 =
-            fake_block_successor_with_merged_tx(&block1, now, rng.random(), false, vec![mined_tx])
-                .await;
+        let block2 = fake_block_successor_with_merged_tx(
+            &block1,
+            now,
+            rng.random(),
+            false,
+            vec![mined_tx.into()],
+            network,
+        )
+        .await;
         alice.set_new_tip(block2).await.unwrap();
 
         let (main_to_peer_tx, mut main_to_peer_rx) =
             broadcast::channel::<MainToPeerTask>(PEER_CHANNEL_CAPACITY);
         merge_upgrade_job
             .handle_upgrade(
-                &TritonVmJobQueue::dummy(),
+                TritonVmJobQueue::dummy(),
                 TransactionOrigin::Own,
                 true,
                 alice.clone(),

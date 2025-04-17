@@ -14,13 +14,13 @@ use crate::config_models::network::Network;
 /// exceptions to this rule exist. For instance: scan mode can be activated by
 /// importing a wallet, even without CLI arguments.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WalletConfiguration {
+pub(crate) struct WalletConfiguration {
     /// Whether we are in scan mode and, if so, how many future keys to scan
     /// with and the range of block heights where the scanning step is done.
     pub(crate) scan_mode: Option<ScanModeConfiguration>,
 
     /// How many mutator set membership proofs to store per monitored UTXO.
-    pub num_mps_per_utxo: usize,
+    pub(crate) num_mps_per_utxo: usize,
 
     /// Where wallet files are stored
     wallet_files_directory: PathBuf,

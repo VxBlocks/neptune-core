@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tokio_util::task::TaskTracker;
+use tokio::task::JoinHandle;
 
 use super::errors::JobHandleError;
 use super::errors::JobQueueError;
@@ -26,16 +27,17 @@ pub struct JobHandle {
 impl JobHandle {
     /// wait for job to complete
     ///
-    /// a completed job may either be finished or cancelled.
+    /// a completed job may either be finished, cancelled, or panicked.
     pub async fn complete(self) -> Result<JobCompletion, JobHandleError> {
         Ok(self.result_rx.await?)
     }
 
-    /// wait for job result, or err if cancelled.
+    /// wait for job result, or err if cancelled or a panic occurred within job.
     pub async fn result(self) -> Result<Box<dyn JobResult>, JobHandleError> {
         match self.complete().await? {
             JobCompletion::Finished(r) => Ok(r),
             JobCompletion::Cancelled => Err(JobHandleError::JobCancelled),
+            JobCompletion::Panicked(e) => Err(JobHandleError::JobPanicked(e)),
         }
     }
 
@@ -79,8 +81,18 @@ struct AddJobMsg<P> {
 /// implements a job queue that sends result of each job to a listener.
 pub struct JobQueue<P> {
     tx: mpsc::UnboundedSender<JobQueueMsg<P>>,
-    tracker: TaskTracker,
-    refs: Arc<()>,
+
+    process_jobs_task_handle: JoinHandle<()>, // Store the job processing task handle
+    add_job_task_handle: JoinHandle<()>,      // store the job addition task handle.
+}
+
+// useful for detecting when a receiver gets dropped.
+struct LoggedReceiver<T>(UnboundedReceiver<T>);
+
+impl<T> Drop for LoggedReceiver<T> {
+    fn drop(&mut self) {
+        tracing::debug!("LoggedReceiver dropped!");
+    }
 }
 
 impl<P> std::fmt::Debug for JobQueue<P> {
@@ -91,32 +103,15 @@ impl<P> std::fmt::Debug for JobQueue<P> {
     }
 }
 
-impl<P> Clone for JobQueue<P> {
-    fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-            tracker: self.tracker.clone(),
-            refs: self.refs.clone(),
-        }
-    }
-}
-
 impl<P> Drop for JobQueue<P> {
-    // since JobQueue has impl Clone there can be other instances.
-    // we must only send the Stop message when dropping the last instance.
-    // if upgrade of a Weak Arc fails then we are the last one.
-    // the refs struct member exists only for this purpose.
-    //
-    // test stop_only_called_once_when_cloned exists to check
-    // it is working.
     fn drop(&mut self) {
-        let refs_weak = Arc::downgrade(&self.refs);
-        self.refs = Arc::new(());
+        tracing::debug!("in JobQueue::drop()");
 
-        // if upgrade fails, then this is the last reference.
-        if refs_weak.upgrade().is_none() {
-            let _ = self.tx.send(JobQueueMsg::Stop);
-        }
+        let _ = self.tx.send(JobQueueMsg::Stop);
+
+        // not really necessary, but it avoids a dead-code warning.
+        self.process_jobs_task_handle.abort();
+        self.add_job_task_handle.abort();
     }
 }
 
@@ -132,7 +127,8 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
             current_job: Option<CurrentJob>,
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<JobQueueMsg<P>>();
+        let (tx, rx) = mpsc::unbounded_channel::<JobQueueMsg<P>>();
+        let mut rx = LoggedReceiver(rx);
 
         let shared = Shared {
             jobs: VecDeque::new(),
@@ -142,12 +138,10 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
 
         let (tx_deque, mut rx_deque) = tokio::sync::mpsc::unbounded_channel();
 
-        let tracker = TaskTracker::new();
-
         // spawns background task that adds incoming jobs to job-queue
         let jobs_rc1 = jobs.clone();
-        tracker.spawn(async move {
-            while let Some(msg) = rx.recv().await {
+        let add_job_task_handle = tokio::spawn(async move {
+            while let Some(msg) = rx.0.recv().await {
                 match msg {
                     JobQueueMsg::AddJob(m) => {
                         let (num_jobs, job_running) = {
@@ -182,11 +176,12 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
                     }
                 }
             }
+            tracing::debug!("task add/stop exiting");
         });
 
         // spawns background task that processes job queue and runs jobs.
         let jobs_rc2 = jobs.clone();
-        tracker.spawn(async move {
+        let process_jobs_task_handle = tokio::spawn(async move {
             let mut job_num: usize = 1;
 
             while rx_deque.recv().await.is_some() {
@@ -210,12 +205,25 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
                     pending
                 );
                 let timer = tokio::time::Instant::now();
-                let job_completion = match msg.job.is_async() {
-                    true => msg.job.run_async_cancellable(msg.cancel_rx).await,
-                    false => tokio::task::spawn_blocking(move || msg.job.run(msg.cancel_rx))
-                        .await
-                        .unwrap(),
+                let task_handle = if msg.job.is_async() {
+                    tokio::spawn(async move { msg.job.run_async_cancellable(msg.cancel_rx).await })
+                } else {
+                    tokio::task::spawn_blocking(move || msg.job.run(msg.cancel_rx))
                 };
+
+                let job_completion = match task_handle.await {
+                    Ok(jc) => jc,
+                    Err(e) => {
+                        if e.is_panic() {
+                            JobCompletion::Panicked(e.into_panic())
+                        } else if e.is_cancelled() {
+                            JobCompletion::Cancelled
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                };
+
                 tracing::info!(
                     "  *** JobQueue: ended job #{} - Completion: {} - {} secs ***",
                     job_num,
@@ -228,24 +236,16 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
 
                 let _ = msg.result_tx.send(job_completion);
             }
+            tracing::debug!("task process_jobs exiting");
         });
-        tracker.close();
+
+        tracing::info!("JobQueue: started new queue.");
 
         Self {
             tx,
-            tracker,
-            refs: Arc::new(()),
+            process_jobs_task_handle,
+            add_job_task_handle,
         }
-    }
-
-    /// alias of Self::start().
-    /// here for two reasons:
-    ///  1. backwards compat with existing tests
-    ///  2. if tests call dummy() instead of start(), then it is easier
-    ///     to find where start() is called for real.
-    #[cfg(test)]
-    pub fn dummy() -> Self {
-        Self::start()
     }
 
     /// adds job to job-queue and returns immediately.
@@ -263,6 +263,9 @@ impl<P: Ord + Send + Sync + 'static> JobQueue<P> {
             cancel_rx: cancel_rx.clone(),
             priority,
         });
+        if self.tx.is_closed() {
+            tracing::error!("JobQueue::add_job() -- add-job channel is unexpectedly closed!!!");
+        }
         self.tx
             .send(msg)
             .map_err(|e| JobQueueError::AddJobError(e.to_string()))?;
@@ -348,16 +351,23 @@ mod tests {
         workers::spawned_tasks_live_as_long_as_jobqueue(true)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     #[traced_test]
-    async fn stop_only_called_once_when_cloned() -> anyhow::Result<()> {
-        workers::stop_only_called_once_when_cloned().await
+    async fn panic_in_async_job_ends_job_cleanly() -> anyhow::Result<()> {
+        workers::panics::panic_in_job_ends_job_cleanly(true).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[traced_test]
+    async fn panic_in_blocking_job_ends_job_cleanly() -> anyhow::Result<()> {
+        workers::panics::panic_in_job_ends_job_cleanly(false).await
     }
 
     mod workers {
         use std::any::Any;
 
         use super::*;
+        use crate::job_queue::errors::JobHandleErrorSync;
 
         #[derive(PartialEq, Eq, PartialOrd, Ord)]
         pub enum DoubleJobPriority {
@@ -533,7 +543,8 @@ mod tests {
                 let result = job_queue
                     .add_job(job, DoubleJobPriority::Low)?
                     .result()
-                    .await?;
+                    .await
+                    .map_err(|e| e.into_sync())?;
 
                 let job_result = result.into_any().downcast::<DoubleJobResult>().unwrap();
 
@@ -697,7 +708,7 @@ mod tests {
             let result_ok_clone = result_ok.clone();
             rt.block_on(async {
                 // create a job queue
-                let job_queue = JobQueue::start();
+                let job_queue = Arc::new(JobQueue::start());
 
                 // spawns background task that adds job
                 let job_queue_cloned = job_queue.clone();
@@ -740,42 +751,80 @@ mod tests {
             Ok(())
         }
 
-        /// this test verifies that the queue is not stopped until the last
-        /// JobQueue reference is dropped.
-        pub(super) async fn stop_only_called_once_when_cloned() -> anyhow::Result<()> {
-            let jq1 = JobQueue::start();
-            let jq2 = jq1.clone();
-            let jq3 = jq1.clone();
+        pub mod panics {
+            use super::*;
 
-            let duration = std::time::Duration::from_secs(3600); // 1 hour job
+            const PANIC_STR: &str = "job panics unexpectedly";
 
-            let job = Box::new(DoubleJob {
-                data: 10,
-                duration,
-                is_async: true,
-            });
+            struct PanicJob {
+                is_async: bool,
+            }
 
-            let rx_handle = jq1.add_job(job, DoubleJobPriority::Low)?;
+            #[async_trait::async_trait]
+            impl Job for PanicJob {
+                fn is_async(&self) -> bool {
+                    self.is_async
+                }
 
-            assert!(!jq1.tx.is_closed());
+                fn run(&self, _cancel_rx: JobCancelReceiver) -> JobCompletion {
+                    panic!("{}", PANIC_STR);
+                }
 
-            drop(jq2);
-            assert!(!jq1.tx.is_closed());
+                async fn run_async_cancellable(
+                    &self,
+                    _cancel_rx: JobCancelReceiver,
+                ) -> JobCompletion {
+                    panic!("{}", PANIC_STR);
+                }
+            }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            assert!(!rx_handle.cancel_tx.is_closed());
+            /// verifies that a job that panics will be ended properly.
+            ///
+            /// Properly means that:
+            /// 1. an error is returned from job_handle.result() indicating job panicked.
+            /// 2. caller is able to obtain panic info, which matches job's panic msg.
+            /// 3. the job-queue continues accepting new jobs.
+            /// 4. the job-queue continues processing jobs.
+            ///
+            /// async_job == true --> test an async job
+            /// async_job == false --> test a blocking job
+            pub async fn panic_in_job_ends_job_cleanly(async_job: bool) -> anyhow::Result<()> {
+                // create a job queue
+                let job_queue = JobQueue::start();
 
-            drop(jq3);
-            assert!(!jq1.tx.is_closed());
+                let job = PanicJob {
+                    is_async: async_job,
+                };
+                let job_handle = job_queue.add_job(Box::new(job), DoubleJobPriority::Low)?;
 
-            drop(jq1);
+                let job_result = job_handle.result().await;
 
-            // rx_handle.cancel().unwrap();
+                println!("job_result: {:#?}", job_result);
 
-            let completion = rx_handle.complete().await?;
-            assert!(matches!(completion, JobCompletion::Cancelled));
+                // verify that job_queue channel still open
+                assert!(!job_queue.tx.is_closed());
 
-            Ok(())
+                // verify that we get an error with the job's panic msg.
+                assert!(matches!(
+                    job_result.map_err(|e| e.into_sync()),
+                    Err(JobHandleErrorSync::JobPanicked(e)) if e == *PANIC_STR
+                ));
+
+                // ensure we can still run another job afterwards.
+                let newjob = Box::new(DoubleJob {
+                    data: 10,
+                    duration: std::time::Duration::from_millis(50),
+                    is_async: false,
+                });
+
+                // ensure we can add another job.
+                let new_job_handle = job_queue.add_job(newjob, DoubleJobPriority::Low)?;
+
+                // ensure job processes and returns a result without error.
+                assert!(new_job_handle.result().await.is_ok());
+
+                Ok(())
+            }
         }
     }
 }
