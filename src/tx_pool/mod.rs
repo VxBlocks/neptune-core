@@ -16,7 +16,12 @@ impl PoolState {
         let path = ":memory:";
 
         #[cfg(not(debug_assertions))]
-        let path = { path.join("transactions.db") };
+        let path = { 
+            if !path.exists() {
+                std::fs::create_dir_all(&path)?;
+            }
+            path.join("transactions.db") 
+        };
 
         let db = sqlite::Connection::open_thread_safe(path)?;
         let db = Arc::new(db);
