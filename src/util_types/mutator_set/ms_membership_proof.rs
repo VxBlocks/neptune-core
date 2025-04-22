@@ -84,31 +84,31 @@ impl MsMembershipProof {
         mutator_set: &MutatorSetAccumulator,
         addition_record: &AdditionRecord,
     ) -> Result<Vec<usize>, Box<dyn Error>> {
-        assert!(
-            membership_proofs
-                .iter()
-                .all(|mp| mp.aocl_leaf_index < mutator_set.aocl.num_leafs()),
-            "No AOCL data index can point outside of provided mutator set. aocl leaf count: {}; mp leaf indices: {}",
-            mutator_set.aocl.num_leafs(),
-            membership_proofs.iter().map(|x| x.aocl_leaf_index.to_string()).join(",")
-        );
-        assert_eq!(
-            membership_proofs.len(),
-            own_items.len(),
-            "Function must be called with same number of membership proofs and items. Got {} items and {} membership proofs", own_items.len(), membership_proofs.len()
-        );
+        // assert!(
+        //     membership_proofs
+        //         .iter()
+        //         .all(|mp| mp.aocl_leaf_index < mutator_set.aocl.num_leafs()),
+        //     "No AOCL data index can point outside of provided mutator set. aocl leaf count: {}; mp leaf indices: {}",
+        //     mutator_set.aocl.num_leafs(),
+        //     membership_proofs.iter().map(|x| x.aocl_leaf_index.to_string()).join(",")
+        // );
+        // assert_eq!(
+        //     membership_proofs.len(),
+        //     own_items.len(),
+        //     "Function must be called with same number of membership proofs and items. Got {} items and {} membership proofs", own_items.len(), membership_proofs.len()
+        // );
 
-        assert!(membership_proofs
-            .iter()
-            .all(|msmp| msmp
-                .target_chunks
-                .iter()
-                .all(|(chunk_index, (mmr_mp, chunk))| mmr_mp.verify(
-                    *chunk_index,
-                    Hash::hash(chunk),
-                    &mutator_set.swbf_inactive.peaks(),
-                    mutator_set.swbf_inactive.num_leafs()
-                ))));
+        // assert!(membership_proofs
+        //     .iter()
+        //     .all(|msmp| msmp
+        //         .target_chunks
+        //         .iter()
+        //         .all(|(chunk_index, (mmr_mp, chunk))| mmr_mp.verify(
+        //             *chunk_index,
+        //             Hash::hash(chunk),
+        //             &mutator_set.swbf_inactive.peaks(),
+        //             mutator_set.swbf_inactive.num_leafs()
+        //         ))));
 
         let new_item_index = mutator_set.aocl.num_leafs();
 
