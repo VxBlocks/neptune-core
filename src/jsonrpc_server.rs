@@ -6,6 +6,9 @@ use crate::models::peer::transaction_notification::TransactionNotification;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::models::state::mempool::TransactionOrigin;
 use crate::tx_pool::{self, PoolState};
+use crate::util_types::mutator_set::archival_mutator_set::{
+    MsMembershipProofEx, RequestMsMembershipProofEx,
+};
 use crate::RPCServerToMain;
 use anyhow::Context;
 use axum::body::Body;
@@ -120,6 +123,10 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/owner_blocks/{start}/{end}",
                 axum::routing::get(get_owner_blocks),
+            )
+            .route(
+                "/rpc/generate_membership_proof",
+                axum::routing::post(generate_restore_membership_proof),
             );
 
         routes
@@ -458,6 +465,37 @@ async fn get_owner_blocks(
     };
 
     Ok(ErasedJson::pretty(guess_reward))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseMsMembershipProofEx {
+    pub height: BlockHeight,
+    pub block_id: Digest,
+    pub proofs: Vec<MsMembershipProofEx>,
+}
+
+async fn generate_restore_membership_proof(
+    State(rpcstate): State<NeptuneRPCServer>,
+    body: axum::body::Bytes,
+) -> Result<Vec<u8>, RestError> {
+    let r_datas: Vec<RequestMsMembershipProofEx> =
+        bincode::deserialize_from(body.reader()).context("deserialize error")?;
+    let state = rpcstate.state.lock_guard().await;
+
+    let ams = state.chain.archival_state().archival_mutator_set.ams();
+
+    let mut proofs = Vec::with_capacity(r_datas.len());
+    for r_data in r_datas {
+        proofs.push(ams.restore_membership_proof_ex(r_data).await.unwrap());
+    }
+
+    let cur_block = state.chain.archival_state().get_tip().await;
+
+    let height = cur_block.header().height;
+    let block_id = cur_block.hash();
+
+    let response = ResponseMsMembershipProofEx { height, block_id, proofs };
+    bincode::serialize(&response).map_err(|e| RestError(e.to_string()))
 }
 
 #[derive(Debug, Serialize, Clone)]
