@@ -1010,7 +1010,7 @@ impl Block {
     /// The amounts in the UTXOs are taken from the transaction fee.
     ///
     /// The genesis block does not have a guesser reward.
-    pub(crate) fn guesser_fee_utxos(&self) -> Vec<Utxo> {
+    pub fn guesser_fee_utxos(&self) -> Vec<Utxo> {
         const MINER_REWARD_TIME_LOCK_PERIOD: Timestamp = Timestamp::years(3);
 
         if self.header().height.is_genesis() {

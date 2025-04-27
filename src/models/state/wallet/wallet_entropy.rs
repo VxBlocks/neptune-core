@@ -48,7 +48,7 @@ impl WalletEntropy {
 
     /// Return the guesser preimage for guessing on top of a given block (as
     /// identified by the block's predecessor's hash).
-    pub(crate) fn guesser_preimage(&self, prev_block_digest: Digest) -> Digest {
+    pub fn guesser_preimage(&self, prev_block_digest: Digest) -> Digest {
         Tip5::hash_varlen(
             &[
                 self.secret_seed.0.encode(),

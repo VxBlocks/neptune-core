@@ -48,7 +48,7 @@ impl IncomingUtxo {
     }
 
     /// Returns true iff this UTXO is a guesser reward.
-    pub(crate) fn is_guesser_fee(&self) -> bool {
+    pub fn is_guesser_fee(&self) -> bool {
         self.utxo
             .is_lockscript_with_preimage(self.receiver_preimage)
     }
