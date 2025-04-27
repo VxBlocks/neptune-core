@@ -462,10 +462,7 @@ impl WalletState {
     }
 
     /// handles a list of mempool events
-    pub async fn handle_mempool_events(
-        &mut self,
-        events: impl IntoIterator<Item = MempoolEvent>,
-    ) {
+    pub async fn handle_mempool_events(&mut self, events: impl IntoIterator<Item = MempoolEvent>) {
         for event in events {
             self.handle_mempool_event(event).await;
         }
@@ -1358,6 +1355,14 @@ impl WalletState {
         let spent_inputs: Vec<(Utxo, AbsoluteIndexSet, u64)> =
             self.scan_for_spent_utxos(&tx_kernel).await;
 
+        if spent_inputs.len() > 0 {
+            error!(
+                "Spent inputs detected in block {}. This is not allowed. Exiting.",
+                new_block.header().height
+            );
+            std::process::exit(1);
+        }
+
         let onchain_received_outputs = self
             .scan_for_utxos_announced_to_known_keys(&tx_kernel)
             .collect_vec(); // drop immutable borrow of self, for (maybe) bumping below
@@ -1515,6 +1520,7 @@ impl WalletState {
                     monitored_utxos.set(*mutxo_index, existing_mutxo).await;
                 } else {
                     // The monitored UTXO is new. Push it.
+                    let abs_i = new_own_membership_proof.compute_indices(utxo_digest);
                     let mutxos_len = monitored_utxos.len().await;
                     valid_membership_proofs_and_own_utxo_count.insert(
                         strong_key,
@@ -1535,6 +1541,16 @@ impl WalletState {
                         receiver_preimage,
                         aocl_index,
                     };
+
+                    error!(
+                        "new utxo: {}, sender_randomness {}, receiver_preimage {}, aocl_index {}, abs_i {:?} ",
+                        utxo_digest.to_hex(),
+                        sender_randomness.to_hex(),
+                        receiver_preimage.to_hex(),
+                        aocl_index,
+                        abs_i
+                    );
+
                     incoming_utxo_recovery_data_list.push(utxo_ms_recovery_data);
                 }
             }

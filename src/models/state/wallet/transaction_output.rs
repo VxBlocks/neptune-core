@@ -32,13 +32,13 @@ use crate::util_types::mutator_set::commit;
 /// and claim a given UTXO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxOutput {
-    utxo: Utxo,
-    sender_randomness: Digest,
-    receiver_digest: Digest,
-    notification_method: UtxoNotifyMethod,
+    pub utxo: Utxo,
+    pub sender_randomness: Digest,
+    pub receiver_digest: Digest,
+    pub notification_method: UtxoNotifyMethod,
 
     /// Indicates if this client can unlock the UTXO
-    owned: bool,
+    pub owned: bool,
 }
 
 impl From<&TxOutput> for AdditionRecord {
@@ -173,11 +173,11 @@ impl TxOutput {
         }
     }
 
-    pub(crate) fn is_offchain(&self) -> bool {
+    pub fn is_offchain(&self) -> bool {
         matches!(self.notification_method, UtxoNotifyMethod::OffChain(_))
     }
 
-    pub(crate) fn utxo(&self) -> Utxo {
+    pub fn utxo(&self) -> Utxo {
         self.utxo.clone()
     }
 
@@ -410,7 +410,7 @@ impl TxOutputList {
     ///
     /// Panics if the receiver preimage does not match the receiver digest from
     /// any transaction output.
-    pub(crate) fn expected_utxos(
+    pub fn expected_utxos(
         &self,
         utxo_notifier: UtxoNotifier,
         receiver_preimage: Digest,

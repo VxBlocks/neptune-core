@@ -24,8 +24,8 @@ use crate::util_types::mutator_set::commit;
 #[cfg_attr(any(test, feature = "arbitrary-impls"), derive(Arbitrary))]
 pub struct IncomingUtxo {
     pub utxo: Utxo,
-    pub(crate) sender_randomness: Digest,
-    pub(crate) receiver_preimage: Digest,
+    pub sender_randomness: Digest,
+    pub receiver_preimage: Digest,
 }
 
 impl From<&ExpectedUtxo> for IncomingUtxo {
@@ -39,7 +39,7 @@ impl From<&ExpectedUtxo> for IncomingUtxo {
 }
 
 impl IncomingUtxo {
-    pub(crate) fn addition_record(&self) -> AdditionRecord {
+    pub fn addition_record(&self) -> AdditionRecord {
         commit(
             Tip5::hash(&self.utxo),
             self.sender_randomness,

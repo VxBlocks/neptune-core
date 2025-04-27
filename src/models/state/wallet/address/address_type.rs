@@ -426,7 +426,7 @@ impl SpendingKey {
         }
     }
 
-    pub(crate) fn lock_script_hash(&self) -> Digest {
+    pub fn lock_script_hash(&self) -> Digest {
         self.lock_script().hash()
     }
 
@@ -493,7 +493,7 @@ impl SpendingKey {
     ///
     ///  - Logs a warning for any announcement targeted at this key that cannot
     ///    be decrypted.
-    pub(crate) fn scan_for_announced_utxos(
+    pub fn scan_for_announced_utxos(
         &self,
         tx_kernel: &TransactionKernel,
     ) -> Vec<IncomingUtxo> {
