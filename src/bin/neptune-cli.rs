@@ -55,6 +55,12 @@ struct TransactionOutput {
     amount: NativeCurrencyAmount,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct TransactionMsg {
+    tx_id: String,
+    outputs: Vec<String>,
+}
+
 /// represents data format of input to claim-utxo
 #[derive(Debug, Clone, Subcommand)]
 enum ClaimUtxoFormat {
@@ -1127,17 +1133,23 @@ async fn main() -> Result<()> {
                 }
             };
 
-            println!(
-                "Successfully created transaction: {}",
-                tx_artifacts.transaction().txid()
-            );
+            let outputs: Vec<String> = tx_artifacts.transaction().kernel.outputs
+                .iter()
+                .map(|output| output.canonical_commitment.to_hex())
+                .collect();
 
-            process_utxo_notifications(
-                &data_directory,
-                network,
-                tx_artifacts.all_offchain_notifications(),
-                Some(receiver_tag),
-            )?
+            let msg = TransactionMsg {
+                tx_id: tx_artifacts.transaction().txid().to_string(),
+                outputs,
+            };
+
+            println!("{}", serde_json::to_string(&msg).unwrap());
+            // process_utxo_notifications(
+            //     &data_directory,
+            //     network,
+            //     tx_artifacts.all_offchain_notifications(),
+            //     Some(receiver_tag),
+            // )?
         }
         Command::SendToMany { outputs, fee } => {
             let parsed_outputs = outputs
@@ -1159,17 +1171,24 @@ async fn main() -> Result<()> {
                 .await?;
             match res {
                 Ok(tx_artifacts) => {
-                    println!(
-                        "Successfully created transaction: {}",
-                        tx_artifacts.transaction().txid()
-                    );
+                    let outputs: Vec<String> = tx_artifacts.transaction().kernel.outputs
+                        .iter()
+                        .map(|output| output.canonical_commitment.to_hex())
+                        .collect();
 
-                    process_utxo_notifications(
-                        &data_directory,
-                        network,
-                        tx_artifacts.all_offchain_notifications(),
-                        None, // todo:  parse receiver tags from cmd-line.
-                    )?
+                    let msg = TransactionMsg {
+                        tx_id: tx_artifacts.transaction().txid().to_string(),
+                        outputs,
+                    };
+
+                    println!("{}", serde_json::to_string(&msg).unwrap());
+
+                    // process_utxo_notifications(
+                    //     &data_directory,
+                    //     network,
+                    //     tx_artifacts.all_offchain_notifications(),
+                    //     None, // todo:  parse receiver tags from cmd-line.
+                    // )?
                 }
                 Err(e) => eprintln!("{}", e),
             }
