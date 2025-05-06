@@ -31,14 +31,14 @@ use crate::util_types::mutator_set::commit;
 /// and claim a given UTXO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxOutput {
-    utxo: Utxo,
-    sender_randomness: Digest,
-    receiver_digest: Digest,
-    notification_method: UtxoNotifyMethod,
+    pub utxo: Utxo,
+    pub sender_randomness: Digest,
+    pub receiver_digest: Digest,
+    pub notification_method: UtxoNotifyMethod,
 
     /// Indicates if this client can unlock the UTXO
-    owned: bool,
-    is_change: bool,
+    pub owned: bool,
+    pub is_change: bool,
 }
 
 impl From<&TxOutput> for AdditionRecord {

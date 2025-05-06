@@ -244,6 +244,7 @@ impl TxOutputListBuilder {
                 OutputFormat::AddressAndAmount(address, amt) => {
                     let sender_randomness = wallet_entropy
                         .generate_sender_randomness(block_height, address.privacy_digest());
+                    tracing::info!("sender_randomness: {:?}", sender_randomness.to_hex());
 
                     // The UtxoNotifyMethod (Onchain or Offchain) is auto-detected
                     // based on whether the address belongs to our wallet or not
@@ -260,6 +261,8 @@ impl TxOutputListBuilder {
                 OutputFormat::AddressAndAmountAndMedium(address, amt, medium) => {
                     let sender_randomness = wallet_entropy
                         .generate_sender_randomness(block_height, address.privacy_digest());
+                    tracing::info!("sender_randomness: {:?}", sender_randomness.to_hex());
+
                     let utxo = Utxo::new_native_currency(address.lock_script(), amt);
                     let owned = wallet_state.can_unlock(&utxo);
 
@@ -269,7 +272,8 @@ impl TxOutputListBuilder {
                 OutputFormat::AddressAndUtxo(address, utxo) => {
                     let sender_randomness = wallet_entropy
                         .generate_sender_randomness(block_height, address.privacy_digest());
-
+                    tracing::info!("sender_randomness: {:?}", sender_randomness.to_hex());
+                    
                     // The UtxoNotifyMethod (Onchain or Offchain) is auto-detected
                     // based on whether the address belongs to our wallet or not
                     TxOutput::auto_utxo(

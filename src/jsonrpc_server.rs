@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use crate::api::export::{Network, ReceivingAddress};
+use crate::models::blockchain::transaction::utxo::Utxo;
 use crate::models::blockchain::transaction::Transaction;
 use crate::models::peer::transaction_notification::TransactionNotification;
 use crate::models::proof_abstractions::timestamp::Timestamp;
 use crate::models::state::mempool::TransactionOrigin;
+use crate::models::state::wallet::transaction_output::TxOutput;
+use crate::models::state::wallet::utxo_notification::UtxoNotifyMethod;
 use crate::tx_pool::{self, PoolState};
+use crate::util_types::mutator_set::addition_record::AdditionRecord;
 use crate::util_types::mutator_set::archival_mutator_set::{
     MsMembershipProofEx, RequestMsMembershipProofEx,
 };
@@ -127,6 +132,10 @@ pub(crate) async fn run_rpc_server(
             .route(
                 "/rpc/generate_membership_proof",
                 axum::routing::post(generate_restore_membership_proof),
+            )
+            .route(
+                "/rpc/build_utxo_index",
+                axum::routing::post(build_utxo_index),
             );
 
         routes
@@ -534,6 +543,42 @@ async fn broadcast_transaction(
         .await;
 
     Ok(ErasedJson::pretty(tx_id.to_string()))
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct UtxoIndexRequest {
+    pub address: String,
+    pub amount: String,
+    pub sender_randomness: String,
+}
+
+async fn build_utxo_index(
+    State(_rpcstate): State<NeptuneRPCServer>,
+    Json(body): Json<UtxoIndexRequest>,
+) -> Result<ErasedJson, RestError> {
+    let network = Network::Main;
+    let receiving_address = ReceivingAddress::from_bech32m(&body.address, network)?;
+    let amount = NativeCurrencyAmount::coins_from_str(&body.amount)?;
+
+    let sender_randomness: Digest = Digest::try_from_hex(&body.sender_randomness)
+        .context("failed to parse sender_randomness as hex digest")?;
+
+    let receiver_digest = receiving_address.privacy_digest();
+    let notification_method = UtxoNotifyMethod::OnChain(receiving_address.clone());
+    let utxo = Utxo::new_native_currency(receiving_address.lock_script(), amount);
+
+    let output = TxOutput {
+        utxo,
+        sender_randomness,
+        receiver_digest,
+        notification_method,
+        owned: false,
+        is_change: false,
+    };
+    let output_record: AdditionRecord = (&output).into();
+    tracing::info!("output: {}", output_record.canonical_commitment.to_hex());
+
+    Ok(ErasedJson::pretty(output_record.canonical_commitment.to_hex()))
 }
 
 mod block_selector {
