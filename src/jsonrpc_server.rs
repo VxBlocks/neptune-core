@@ -222,7 +222,11 @@ async fn get_block_info(
     let tip_digest = state.chain.light_state().hash();
     let archival_state = state.chain.archival_state();
 
-    let Some(block) = archival_state.get_block(digest).await.unwrap() else {
+    let Some(block) = archival_state
+        .get_block(digest)
+        .await
+        .context("Failed to get block")?
+    else {
         return Ok(ErasedJson::pretty(Option::<BlockInfo>::None));
     };
     let is_canonical = archival_state
@@ -495,7 +499,9 @@ async fn generate_restore_membership_proof(
 
     let mut proofs = Vec::with_capacity(r_datas.len());
     for r_data in r_datas {
-        proofs.push(ams.restore_membership_proof_ex(r_data).await.unwrap());
+        if let Ok(p) = ams.restore_membership_proof_ex(r_data).await {
+            proofs.push(p);
+        }
     }
 
     let cur_block = state.chain.archival_state().get_tip().await;
@@ -503,7 +509,11 @@ async fn generate_restore_membership_proof(
     let height = cur_block.header().height;
     let block_id = cur_block.hash();
 
-    let response = ResponseMsMembershipProofEx { height, block_id, proofs };
+    let response = ResponseMsMembershipProofEx {
+        height,
+        block_id,
+        proofs,
+    };
     bincode::serialize(&response).map_err(|e| RestError(e.to_string()))
 }
 
@@ -578,7 +588,9 @@ async fn build_utxo_index(
     let output_record: AdditionRecord = (&output).into();
     tracing::info!("output: {}", output_record.canonical_commitment.to_hex());
 
-    Ok(ErasedJson::pretty(output_record.canonical_commitment.to_hex()))
+    Ok(ErasedJson::pretty(
+        output_record.canonical_commitment.to_hex(),
+    ))
 }
 
 mod block_selector {
