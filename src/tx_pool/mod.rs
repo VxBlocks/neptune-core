@@ -1,7 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{bail, Result};
+use rand::Rng;
 use sqlite::State;
+use tasm_lib::twenty_first;
 
 pub mod router;
 
@@ -16,11 +18,11 @@ impl PoolState {
         let path = ":memory:";
 
         #[cfg(not(debug_assertions))]
-        let path = { 
+        let path = {
             if !path.exists() {
                 std::fs::create_dir_all(&path)?;
             }
-            path.join("transactions.db") 
+            path.join("transactions.db")
         };
 
         let db = sqlite::Connection::open_thread_safe(path)?;
@@ -35,26 +37,28 @@ impl PoolState {
             "CREATE TABLE IF NOT EXISTS transactions (
                 id TEXT PRIMARY KEY,
                 rawtx BLOB NOT NULL,
-                fee BIGINT NOT NULL
+                fee BIGINT NOT NULL,
+                height INTEGER DEFAULT 0,
+                queue_time INTEGER DEFAULT 0,
+                finished_at INTEGER DEFAULT 0,
+                revoke_key TEXT NOT NULL,
             )",
         )?;
         self.db
             .execute("CREATE INDEX IF NOT EXISTS idx_transactions_fee ON transactions (fee)")?;
 
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS executing (
-                id TEXT PRIMARY KEY,
-                rawtx BLOB NOT NULL,
-                fee BIGINT NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                finished_at INTEGER DEFAULT 0
-            )
-            ",
-        )?;
         Ok(())
     }
 
-    pub fn add_transaction(&self, id: &str, transaction: &[u8], fee: i128) -> Result<()> {
+    pub fn add_transaction(&self, id: &str, transaction: &[u8], fee: i128) -> Result<String> {
+        // generate a random key
+        let mut rng = rand::rng();
+        let mut revoke_key = vec![];
+        for _ in 0..32 {
+            revoke_key.push(rng.random_range('a'..='z'));
+        }
+        let revoke_key = String::from_iter(revoke_key);
+
         let mut stmt = self
             .db
             .prepare("INSERT INTO transactions (id,rawtx,fee) VALUES (?,?,?)")?;
@@ -68,7 +72,7 @@ impl PoolState {
         let fee = fee_to_i64(fee);
         stmt.bind((3, fee))?;
         stmt.next()?;
-        Ok(())
+        Ok(revoke_key)
     }
 
     pub fn get_most_worth_transaction(&self) -> Result<Option<Vec<u8>>, sqlite::Error> {
