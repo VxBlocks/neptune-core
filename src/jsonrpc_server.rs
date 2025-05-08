@@ -626,7 +626,7 @@ async fn send_transaction(
         }
     }
 
-    let insert = true;
+    let insert = false;
 
     if insert {
         let tx = send_tx.broadcast_tx;
