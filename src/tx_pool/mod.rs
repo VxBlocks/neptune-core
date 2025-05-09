@@ -41,7 +41,7 @@ impl PoolState {
                 height INTEGER DEFAULT 0,
                 queue_time INTEGER DEFAULT 0,
                 finished_at INTEGER DEFAULT 0,
-                revoke_key TEXT NOT NULL,
+                revoke_key TEXT NOT NULL
             )",
         )?;
         self.db
