@@ -1776,8 +1776,8 @@ impl MainLoopHandler {
                 Ok(false)
             }
             RPCServerToMain::BroadcastNotification(n) => {
-                self.main_to_peer_broadcast_tx
-                    .send(MainToPeerTask::TransactionNotification(n));
+                let pmsg = MainToPeerTask::TransactionNotification(n);
+                self.main_to_peer_broadcast(pmsg);
                 Ok(false)
             }
             RPCServerToMain::ClearMempool => {

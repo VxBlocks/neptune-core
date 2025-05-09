@@ -641,7 +641,7 @@ async fn send_transaction(
         let busy = true;
         if busy {
             return Ok(ErasedJson::pretty(ResponseSendTx {
-                status: 1,
+                status: 4,
                 message: "proof machine is busy".to_string(),
             }));
         }
